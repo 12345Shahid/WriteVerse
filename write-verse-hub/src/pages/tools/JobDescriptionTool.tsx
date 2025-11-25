@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Loader2, Sparkles, Copy, Check } from "lucide-react";
+import { useBrandVoice } from "@/context/BrandVoiceContext";
 
 /**
  * Job Description Generator Tool
@@ -41,6 +42,7 @@ import { Loader2, Sparkles, Copy, Check } from "lucide-react";
  */
 
 const JobDescriptionTool = () => {
+  const { selectedVoiceId } = useBrandVoice();
   const [formData, setFormData] = useState({
     roleTitle: "",
     responsibilities: "",
@@ -75,6 +77,7 @@ const JobDescriptionTool = () => {
         tool: "job_description",
         inputs: formData,
         outputCount: 1,
+        brandVoiceId: selectedVoiceId,
       });
       const obj = (data?.results ?? null) as any;
       console.debug("has.sections", !!obj && typeof obj === 'object');

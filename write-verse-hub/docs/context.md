@@ -562,3 +562,35 @@ Mobile app via React Native
 
 
 [ in case in the description for the AI model, maybe open AI is used, but I want to use Gemini and the cheapest model from Gemini maybe 2.0 flash. But you can know more about the AI model by searching in the Internet.]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

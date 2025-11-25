@@ -33,7 +33,7 @@ const PublicShare = () => {
       try {
         setLoading(true);
         setError(null);
-        const res = await fetch(`/api/public/${slug}`);
+        const res = await fetch(`/api/public-get?slug=${encodeURIComponent(slug)}`);
         const text = await res.text();
         let json: any = null;
         try { json = JSON.parse(text); } catch {}
@@ -224,6 +224,254 @@ const PublicShare = () => {
           </div>
         );
       }
+      case "blog_post": {
+        const r = results || {};
+        const outline = Array.isArray(r.outline) ? r.outline : [];
+        return (
+          <article className="border-4 border-black bg-card p-6 shadow-brutal space-y-4">
+            {r.title && (
+              <header className="space-y-2">
+                <h2 className="text-2xl font-bold">{r.title}</h2>
+                {r.meta_description && (
+                  <p className="text-sm text-muted-foreground">{r.meta_description}</p>
+                )}
+              </header>
+            )}
+            {outline.length > 0 && (
+              <section className="border-2 border-black bg-background p-3">
+                <div className="text-xs font-bold uppercase mb-2">Outline</div>
+                <ul className="list-disc pl-5 space-y-1">
+                  {outline.map((h: string, i: number) => (
+                    <li key={i} className="text-sm">{h}</li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {r.body && (
+              <section className="prose max-w-none whitespace-pre-wrap text-sm leading-relaxed">
+                {r.body}
+              </section>
+            )}
+          </article>
+        );
+      }
+      case "article_from_outline": {
+        const r = results || {};
+        const outline = Array.isArray(r.outline) ? r.outline : [];
+        return (
+          <article className="border-4 border-black bg-card p-6 shadow-brutal space-y-4">
+            {r.title && (
+              <header className="space-y-2">
+                <h2 className="text-2xl font-bold">{r.title}</h2>
+              </header>
+            )}
+            {outline.length > 0 && (
+              <section className="border-2 border-black bg-background p-3">
+                <div className="text-xs font-bold uppercase mb-2">Outline</div>
+                <ul className="list-disc pl-5 space-y-1">
+                  {outline.map((h: string, i: number) => (
+                    <li key={i} className="text-sm">{h}</li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {r.body && (
+              <section className="prose max-w-none whitespace-pre-wrap text-sm leading-relaxed">
+                {r.body}
+              </section>
+            )}
+          </article>
+        );
+      }
+      case "seo_blog_optimizer": {
+        const r = results || {};
+        const headings = Array.isArray(r.suggested_headings) ? r.suggested_headings : [];
+        const notes = Array.isArray(r.keyword_usage_notes) ? r.keyword_usage_notes : [];
+        return (
+          <div className="space-y-4">
+            <article className="border-4 border-black bg-card p-6 shadow-brutal space-y-4">
+              {r.optimized_title && (
+                <header className="space-y-2">
+                  <h2 className="text-2xl font-bold">{r.optimized_title}</h2>
+                  {r.optimized_meta_description && (
+                    <p className="text-sm text-muted-foreground">{r.optimized_meta_description}</p>
+                  )}
+                </header>
+              )}
+              {headings.length > 0 && (
+                <section className="border-2 border-black bg-background p-3">
+                  <div className="text-xs font-bold uppercase mb-2">Suggested Headings</div>
+                  <ul className="list-disc pl-5 space-y-1">
+                    {headings.map((h: string, i: number) => (
+                      <li key={i} className="text-sm">{h}</li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+              {r.optimized_body && (
+                <section className="prose max-w-none whitespace-pre-wrap text-sm leading-relaxed">
+                  {r.optimized_body}
+                </section>
+              )}
+            </article>
+            {(notes.length > 0 || r.improvements_summary) && (
+              <section className="border-4 border-black bg-background p-4 shadow-brutal">
+                <div className="text-xs font-bold uppercase mb-2">SEO Notes</div>
+                {r.improvements_summary && (
+                  <p className="text-sm mb-2">{r.improvements_summary}</p>
+                )}
+                {notes.length > 0 && (
+                  <ul className="list-disc pl-5 space-y-1 text-sm">
+                    {notes.map((n: string, i: number) => (
+                      <li key={i}>{n}</li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            )}
+          </div>
+        );
+      }
+      case "case_study_writer": {
+        const r = results || {};
+        return (
+          <article className="border-4 border-black bg-card p-6 shadow-brutal space-y-4">
+            {r.headline && (
+              <header className="space-y-2">
+                <h2 className="text-2xl font-bold">{r.headline}</h2>
+                {r.summary && (
+                  <p className="text-sm text-muted-foreground">{r.summary}</p>
+                )}
+              </header>
+            )}
+            {r.background && (
+              <section className="space-y-1">
+                <h3 className="text-lg font-bold">Background</h3>
+                <p className="whitespace-pre-wrap text-sm">{r.background}</p>
+              </section>
+            )}
+            {r.challenge && (
+              <section className="space-y-1">
+                <h3 className="text-lg font-bold">Challenge</h3>
+                <p className="whitespace-pre-wrap text-sm">{r.challenge}</p>
+              </section>
+            )}
+            {r.solution && (
+              <section className="space-y-1">
+                <h3 className="text-lg font-bold">Solution</h3>
+                <p className="whitespace-pre-wrap text-sm">{r.solution}</p>
+              </section>
+            )}
+            {r.results && (
+              <section className="space-y-1">
+                <h3 className="text-lg font-bold">Results</h3>
+                <p className="whitespace-pre-wrap text-sm">{r.results}</p>
+              </section>
+            )}
+            {r.quote && (
+              <section className="space-y-1 border-l-4 border-black pl-4">
+                <h3 className="text-xs font-bold uppercase">Client Quote</h3>
+                <p className="italic text-sm">“{r.quote}”</p>
+              </section>
+            )}
+          </article>
+        );
+      }
+      case "landing_page_writer": {
+        const r = results || {};
+        const sections = Array.isArray(r.sections) ? r.sections : [];
+        const faqs = Array.isArray(r.faq_items) ? r.faq_items : [];
+        return (
+          <article className="border-4 border-black bg-card p-6 shadow-brutal space-y-4">
+            {(r.hero_headline || r.hero_subheadline || r.hero_cta) && (
+              <header className="space-y-2">
+                {r.hero_headline && (
+                  <h2 className="text-3xl font-bold">{r.hero_headline}</h2>
+                )}
+                {r.hero_subheadline && (
+                  <p className="text-lg text-muted-foreground">{r.hero_subheadline}</p>
+                )}
+                {r.hero_cta && (
+                  <p className="text-sm font-semibold">Primary CTA: {r.hero_cta}</p>
+                )}
+              </header>
+            )}
+            {sections.length > 0 && (
+              <div className="space-y-4">
+                {sections.map((s: any, i: number) => (
+                  <section key={i} className="space-y-1">
+                    {s.title && <h3 className="text-lg font-bold">{s.title}</h3>}
+                    <p className="whitespace-pre-wrap text-sm">{s.body}</p>
+                  </section>
+                ))}
+              </div>
+            )}
+            {faqs.length > 0 && (
+              <section className="border-t-2 border-black pt-4 mt-2">
+                <h3 className="text-lg font-bold mb-2">FAQ</h3>
+                <div className="space-y-2">
+                  {faqs.map((f: any, i: number) => (
+                    <div key={i} className="border-2 border-black bg-background p-3">
+                      <div className="font-bold">Q: {f.question}</div>
+                      <div className="text-sm mt-1">A: {f.answer}</div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+          </article>
+        );
+      }
+      case "report_writer": {
+        const r = results || {};
+        const sections = Array.isArray(r.sections) ? r.sections : [];
+        return (
+          <article className="border-4 border-black bg-card p-6 shadow-brutal space-y-4">
+            {r.title && (
+              <header className="space-y-2">
+                <h2 className="text-2xl font-bold">{r.title}</h2>
+                {r.abstract && (
+                  <p className="text-sm text-muted-foreground">{r.abstract}</p>
+                )}
+              </header>
+            )}
+            {sections.length > 0 && (
+              <div className="space-y-4">
+                {sections.map((s: any, i: number) => (
+                  <section key={i} className="space-y-1">
+                    {s.heading && <h3 className="text-lg font-bold">{s.heading}</h3>}
+                    <p className="whitespace-pre-wrap text-sm">{s.body}</p>
+                  </section>
+                ))}
+              </div>
+            )}
+          </article>
+        );
+      }
+      case "blog_helper":
+      case "copy_helper":
+      case "social_helper":
+      case "email_writer":
+      case "rewrite_helper": {
+        const arr = Array.isArray(results) ? results : results ? [results] : [];
+        return (
+          <div className="space-y-3">
+            {arr.map((r:any, i:number) => {
+              const text = typeof r === "string"
+                ? r
+                : typeof r?.text === "string"
+                  ? r.text
+                  : JSON.stringify(r, null, 2);
+              return (
+                <div key={i} className="border-2 border-black bg-muted p-3">
+                  <div className="text-xs font-bold uppercase mb-1">Variation #{i + 1}</div>
+                  <p className="whitespace-pre-wrap text-sm">{text}</p>
+                </div>
+              );
+            })}
+          </div>
+        );
+      }
       default:
         return (
           <pre className="whitespace-pre-wrap text-sm p-4 border-2 border-black bg-background">{JSON.stringify(results, null, 2)}</pre>
@@ -268,11 +516,6 @@ const PublicShare = () => {
             onClick={() => navigator.clipboard.writeText(shareUrl)}
           >Copy Link</Button>
         </div>
-
-        {/* Inputs summary (simple pretty print) */}
-        <Section title="Inputs">
-          <pre className="whitespace-pre-wrap text-sm">{JSON.stringify(data.input_data, null, 2)}</pre>
-        </Section>
 
         {/* Results */}
         <div className="space-y-2">

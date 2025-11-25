@@ -1,11 +1,16 @@
 import { useEffect, useState } from "react";
 import { ToolLayout } from "@/components/tool/ToolLayout";
 import { Button } from "@/components/ui/button-brutal";
-import { getProfile, createCheckoutSession } from "@/lib/api";
+import { getProfile, createCheckoutSession, confirmCheckout } from "@/lib/api";
+import { useTeam } from "@/context/TeamContext";
+import { getTeamCredits } from "@/lib/api-teams";
 
 const Dashboard = () => {
+  const { currentTeam } = useTeam();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [checkingSession, setCheckingSession] = useState(false);
+  const [checkoutMessage, setCheckoutMessage] = useState<string | null>(null);
   const [profile, setProfile] = useState<{
     monthly_token_limit: number;
     tokens_used_this_month: number;
@@ -19,8 +24,22 @@ const Dashboard = () => {
     (async () => {
       console.groupCollapsed("[Dashboard] Load profile");
       try {
-        const data = await getProfile();
-        setProfile(data);
+        // Load User Profile
+        const userData = await getProfile();
+        let credits = userData.credits_balance;
+
+        // Load Team Credits if active
+        if (currentTeam) {
+          try {
+            const teamCreds = await getTeamCredits(currentTeam.id);
+            credits = teamCreds.balance_credits;
+            console.log("[Dashboard] Loaded team credits", credits);
+          } catch (err) {
+            console.warn("[Dashboard] Failed to load team credits", err);
+          }
+        }
+
+        setProfile({ ...userData, credits_balance: credits });
       } catch (e: any) {
         setError(e?.message || "Failed to load profile");
         console.error("[Dashboard] Load failed", e);
@@ -29,6 +48,50 @@ const Dashboard = () => {
         setLoading(false);
       }
     })();
+  }, [currentTeam]);
+
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href);
+      const sessionId = url.searchParams.get("session_id");
+      if (!sessionId) return;
+
+      console.groupCollapsed("[Dashboard] Confirm checkout", sessionId);
+      setCheckingSession(true);
+      (async () => {
+        try {
+          const result = await confirmCheckout(sessionId);
+          if (result.ok) {
+            setCheckoutMessage(
+              result.alreadyConfirmed
+                ? "Checkout already confirmed. Credits are up to date."
+                : `Added ${result.credits_added ?? 0} credits. New balance: ${result.new_balance ?? "N/A"}.`
+            );
+            try {
+              console.log("[Dashboard] Reloading profile after checkout confirm");
+              const data = await getProfile();
+              setProfile(data);
+            } catch (e: any) {
+              console.error("[Dashboard] Reload profile after checkout failed", e);
+            }
+          }
+        } catch (e: any) {
+          console.error("[Dashboard] Confirm checkout failed", e);
+          setError(e?.message || "Failed to confirm checkout");
+        } finally {
+          setCheckingSession(false);
+          console.groupEnd();
+          try {
+            url.searchParams.delete("session_id");
+            window.history.replaceState({}, "", url.toString());
+          } catch {
+            // ignore
+          }
+        }
+      })();
+    } catch (e) {
+      console.warn("[Dashboard] Failed to parse URL for session_id", e);
+    }
   }, []);
 
   const credits = profile?.credits_balance ?? 0;
@@ -47,6 +110,16 @@ const Dashboard = () => {
           </div>
         ) : (
           <>
+            {checkingSession && (
+              <div className="border-4 border-black bg-muted p-3 shadow-brutal mb-3 text-sm">
+                Confirming recent checkout and updating credits...
+              </div>
+            )}
+            {checkoutMessage && !error && (
+              <div className="border-4 border-black bg-card p-3 shadow-brutal mb-3 text-sm">
+                {checkoutMessage}
+              </div>
+            )}
             {/* Summary cards */}
             <div className="grid md:grid-cols-2 gap-6">
               <div className="border-4 border-black bg-card p-6 shadow-brutal">

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTeam } from "@/context/TeamContext";
 import { ToolLayout } from "@/components/tool/ToolLayout";
 import { Button } from "@/components/ui/button-brutal";
 import { getSavedResults, deleteSavedResult, shareSavedResult, unshareSavedResult } from "@/lib/api";
@@ -15,6 +16,9 @@ interface SavedItem {
 }
 
 const Results = () => {
+  const { currentTeam } = useTeam();
+  const isViewer = currentTeam?.role === 'viewer';
+
   const [items, setItems] = useState<SavedItem[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -181,11 +185,12 @@ const Results = () => {
                     <Button variant="outline" onClick={() => setOpenId(openId === item.id ? null : item.id)}>
                       {openId === item.id ? 'Hide' : 'View'}
                     </Button>
+                    {/* TODO: Future - Permission check for download could be added here */}
                     <Button variant="outline" onClick={() => renderExport(item)}>
                       Export
                     </Button>
                     {item.is_public ? (
-                      <Button variant="outline" onClick={async () => {
+                      <Button variant="outline" disabled={isViewer} onClick={async () => {
                         try {
                           await unshareSavedResult(item.id);
                           setItems((prev) => prev.map((it) => it.id === item.id ? { ...it, is_public: false, public_slug: null } : it));
@@ -196,7 +201,7 @@ const Results = () => {
                         Unshare
                       </Button>
                     ) : (
-                      <Button variant="outline" onClick={async () => {
+                      <Button variant="outline" disabled={isViewer} onClick={async () => {
                         try {
                           const { public_slug } = await shareSavedResult(item.id);
                           setItems((prev) => prev.map((it) => it.id === item.id ? { ...it, is_public: true, public_slug } : it));
@@ -207,7 +212,7 @@ const Results = () => {
                         Share Public
                       </Button>
                     )}
-                    <Button variant="destructive" onClick={() => handleDelete(item.id)}>
+                    <Button variant="destructive" disabled={isViewer} onClick={() => handleDelete(item.id)}>
                       Delete
                     </Button>
                   </div>

@@ -1,11 +1,25 @@
 import { getUserId } from './supabase';
 
+export async function getCommonHeaders() {
+  const userId = await getUserId();
+  const teamId = typeof window !== 'undefined' ? window.localStorage.getItem('writerai_active_team') : null;
+  return {
+    'Content-Type': 'application/json',
+    ...(userId ? { 'X-User-Id': userId } : {}),
+    ...(teamId ? { 'x-organization-id': teamId } : {}),
+  };
+}
+
 export async function generate(params: {
   tool: 'email_subject' | 'resume' | 'cold_email' | 'product_description' | 'job_description' | 'linkedin'
-    | 'social_ad' | 'summarizer' | 'cover_letter' | 'twitter_thread' | 'faq' | 'script';
+    | 'social_ad' | 'summarizer' | 'cover_letter' | 'twitter_thread' | 'faq' | 'script' | 'blog_helper'
+    | 'copy_helper' | 'social_helper' | 'email_writer' | 'rewrite_helper'
+    | 'blog_post' | 'article_from_outline' | 'seo_blog_optimizer'
+    | 'case_study_writer' | 'landing_page_writer' | 'report_writer';
   inputs: Record<string, any>;
   outputCount?: number;
   tone?: string;
+  brandVoiceId?: string;
 }) {
   const started = performance.now();
   const userId = await getUserId();
@@ -14,6 +28,7 @@ export async function generate(params: {
     inputs: params.inputs,
     outputCount: params.outputCount ?? 3,
     tone: params.tone,
+    brandVoiceId: params.brandVoiceId,
   };
 
   console.groupCollapsed('[API] POST /api/generate');
@@ -22,10 +37,7 @@ export async function generate(params: {
   try {
     const res = await fetch('/api/generate', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(userId ? { 'X-User-Id': userId } : {}),
-      },
+      headers: await getCommonHeaders(),
       body: JSON.stringify(body),
     });
 
@@ -58,10 +70,7 @@ export async function saveResults(payload: { tool_name: string; input_data: any;
   try {
     const res = await fetch('/api/results/save', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(userId ? { 'X-User-Id': userId } : {}),
-      },
+      headers: await getCommonHeaders(),
       body: JSON.stringify(payload),
     });
     const text = await res.text();
@@ -79,18 +88,54 @@ export async function saveResults(payload: { tool_name: string; input_data: any;
   }
 }
 
-export async function shareSavedResult(id: string) {
+export async function confirmCheckout(sessionId: string) {
   const userId = await getUserId();
-  console.groupCollapsed('[API] POST /api/results/:id/share');
+  console.groupCollapsed('[API] POST /api/checkout/confirm');
   console.debug('headers.x-user-id', userId || '(none)');
-  console.debug('id', id);
+  console.debug('sessionId', sessionId);
   try {
-    const res = await fetch(`/api/results/${id}/share`, {
+    const res = await fetch('/api/checkout/confirm', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(userId ? { 'X-User-Id': userId } : {}),
       },
+      body: JSON.stringify({ sessionId }),
+    });
+    const text = await res.text();
+    let json: any = null;
+    try { json = JSON.parse(text); } catch {}
+    console.debug('response.status', res.status);
+    console.debug('response.body', json ?? text.slice(0, 500));
+    if (!res.ok) throw new Error(json?.message || `HTTP ${res.status}`);
+    return json as {
+      ok: boolean;
+      alreadyConfirmed?: boolean;
+      credits_added?: number;
+      new_balance?: number;
+      new_lifetime?: number;
+    };
+  } catch (err) {
+    console.error('[API] /api/checkout/confirm error', err);
+    throw err;
+  } finally {
+    console.groupEnd();
+  }
+}
+
+export async function shareSavedResult(id: string) {
+  const userId = await getUserId();
+  console.groupCollapsed('[API] POST /api/results-share');
+  console.debug('headers.x-user-id', userId || '(none)');
+  console.debug('id', id);
+  try {
+    const res = await fetch(`/api/results-share`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(userId ? { 'X-User-Id': userId } : {}),
+      },
+      body: JSON.stringify({ id }),
     });
     const text = await res.text();
     let json: any = null;
@@ -100,7 +145,7 @@ export async function shareSavedResult(id: string) {
     if (!res.ok) throw new Error(json?.message || `HTTP ${res.status}`);
     return json as { public_slug: string };
   } catch (err) {
-    console.error('[API] /api/results/:id/share error', err);
+    console.error('[API] /api/results-share error', err);
     throw err;
   } finally {
     console.groupEnd();
@@ -109,16 +154,17 @@ export async function shareSavedResult(id: string) {
 
 export async function unshareSavedResult(id: string) {
   const userId = await getUserId();
-  console.groupCollapsed('[API] POST /api/results/:id/unshare');
+  console.groupCollapsed('[API] POST /api/results-unshare');
   console.debug('headers.x-user-id', userId || '(none)');
   console.debug('id', id);
   try {
-    const res = await fetch(`/api/results/${id}/unshare`, {
+    const res = await fetch(`/api/results-unshare`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(userId ? { 'X-User-Id': userId } : {}),
       },
+      body: JSON.stringify({ id }),
     });
     const text = await res.text();
     let json: any = null;
@@ -128,7 +174,7 @@ export async function unshareSavedResult(id: string) {
     if (!res.ok) throw new Error(json?.message || `HTTP ${res.status}`);
     return json as { ok: boolean };
   } catch (err) {
-    console.error('[API] /api/results/:id/unshare error', err);
+    console.error('[API] /api/results-unshare error', err);
     throw err;
   } finally {
     console.groupEnd();
@@ -195,13 +241,13 @@ export async function setAbTestWinner(id: string, winner: 'A' | 'B') {
   console.debug('headers.x-user-id', userId || '(none)');
   console.debug('id', id, 'winner', winner);
   try {
-    const res = await fetch(`/api/ab-tests/${id}/winner`, {
+    const res = await fetch(`/api/ab-tests-winner`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(userId ? { 'X-User-Id': userId } : {}),
       },
-      body: JSON.stringify({ winner }),
+      body: JSON.stringify({ id, winner }),
     });
     const text = await res.text();
     let json: any = null;
@@ -278,11 +324,13 @@ export async function deleteSavedResult(id: string) {
   console.debug('headers.x-user-id', userId || '(none)');
   console.debug('id', id);
   try {
-    const res = await fetch(`/api/results/${id}`, {
-      method: 'DELETE',
+    const res = await fetch(`/api/results-delete`, {
+      method: 'POST',
       headers: {
+        'Content-Type': 'application/json',
         ...(userId ? { 'X-User-Id': userId } : {}),
       },
+      body: JSON.stringify({ id }),
     });
     const text = await res.text();
     let json: any = null;

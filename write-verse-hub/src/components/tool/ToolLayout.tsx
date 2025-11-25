@@ -1,6 +1,7 @@
 import { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { SiteNav } from "@/components/SiteNav";
+import { BrandVoiceSelector } from "./BrandVoiceSelector";
 
 /**
  * Shared Tool Layout Component
@@ -33,9 +34,14 @@ export const ToolLayout = ({ children, title, description }: ToolLayoutProps) =>
 
       {/* Tool Header */}
       <div className="border-b-4 border-black bg-muted">
-        <div className="container mx-auto px-4 py-6">
-          <h1 className="text-3xl md:text-4xl font-bold mb-2">{title}</h1>
-          <p className="text-lg font-medium text-muted-foreground">{description}</p>
+        <div className="container mx-auto px-4 py-6 flex flex-col md:flex-row justify-between md:items-end gap-4">
+          <div>
+            <h1 className="text-3xl md:text-4xl font-bold mb-2">{title}</h1>
+            <p className="text-lg font-medium text-muted-foreground">{description}</p>
+          </div>
+          <div className="shrink-0">
+            <BrandVoiceSelector />
+          </div>
         </div>
       </div>
 

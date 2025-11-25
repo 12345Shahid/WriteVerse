@@ -7,10 +7,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Loader2, Sparkles } from "lucide-react";
+import { useBrandVoice } from "@/context/BrandVoiceContext";
 
 interface AdRow { text: string; platform: string; predictedCtr: string; trigger: string; charCount: number; }
 
 const SocialAdTool = () => {
+  const { selectedVoiceId } = useBrandVoice();
   const [formData, setFormData] = useState({
     productName: "",
     audience: "millennials",
@@ -29,7 +31,12 @@ const SocialAdTool = () => {
     console.groupCollapsed("[SocialAdTool] Generate");
     console.debug("inputs", formData);
     try {
-      const data = await generate({ tool: "social_ad", inputs: formData, outputCount: 5 });
+      const data = await generate({
+        tool: "social_ad",
+        inputs: formData,
+        outputCount: 5,
+        brandVoiceId: selectedVoiceId
+      });
       const arr = (data?.results ?? []) as AdRow[];
       console.debug("results.count", Array.isArray(arr) ? arr.length : 0);
       setResults(arr);

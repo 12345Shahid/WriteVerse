@@ -34,21 +34,13 @@ const About = () => {
           </ul>
         </section>
 
-        <section className="grid md:grid-cols-2 gap-6">
+        <section className="grid md:grid-cols-1 gap-6">
           <div className="border-4 border-black bg-card p-6 shadow-brutal">
             <h3 className="text-xl font-bold mb-2">Principles</h3>
             <ul className="list-disc pl-6 font-medium space-y-2">
               <li>Clarity over complexity</li>
               <li>Speed and reliability</li>
               <li>Respect for user time and data</li>
-            </ul>
-          </div>
-          <div className="border-4 border-black bg-card p-6 shadow-brutal">
-            <h3 className="text-xl font-bold mb-2">Tech</h3>
-            <ul className="list-disc pl-6 font-medium space-y-2">
-              <li>Frontend: React 18, TypeScript, Tailwind, shadcn/ui</li>
-              <li>Backend: Node.js (Express), Google Gemini 2.0 Flash</li>
-              <li>Data & Auth: Supabase (Postgres, Auth, RLS)</li>
             </ul>
           </div>
         </section>

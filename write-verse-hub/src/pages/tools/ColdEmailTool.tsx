@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Loader2, Sparkles } from "lucide-react";
+import { useBrandVoice } from "@/context/BrandVoiceContext";
 
 /**
  * Cold Email Personalizer Tool
@@ -39,6 +40,7 @@ interface Result {
 }
 
 const ColdEmailTool = () => {
+  const { selectedVoiceId } = useBrandVoice();
   const [formData, setFormData] = useState({
     prospectName: "",
     company: "",
@@ -64,6 +66,7 @@ const ColdEmailTool = () => {
         tool: "cold_email",
         inputs: formData,
         outputCount: 3,
+        brandVoiceId: selectedVoiceId,
       });
       const arr = (data?.results ?? []) as Result[];
       console.debug("results.count", Array.isArray(arr) ? arr.length : 0);

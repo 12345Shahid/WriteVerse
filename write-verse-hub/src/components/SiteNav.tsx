@@ -2,17 +2,23 @@ import { Link } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { Button } from "@/components/ui/button-brutal";
-import { Sparkles, ArrowLeft } from "lucide-react";
+import { Sparkles, ArrowLeft, ChevronDown } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import { TOOL_CATEGORIES } from "@/config/tools";
 
 export const SiteNav = () => {
   const [tokensLeft, setTokensLeft] = useState<number | null>(null);
   const [user, setUser] = useState<any>(null);
+  const [openCategoryId, setOpenCategoryId] = useState<string | null>(
+    TOOL_CATEGORIES[0]?.id ?? null,
+  );
 
   useEffect(() => {
     let unsub: (() => void) | null = null;
@@ -57,43 +63,36 @@ export const SiteNav = () => {
                   All Tools
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent>
-                <DropdownMenuItem asChild>
-                  <Link to="/tools/email-subject">Email Subject Lines</Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/tools/resume">Resume Bullets</Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/tools/cold-email">Cold Emails</Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/tools/product-description">Product Descriptions</Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/tools/job-description">Job Descriptions</Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/tools/linkedin">LinkedIn Posts</Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/tools/social-ad">Social Ad Copy</Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/tools/summarizer">Summarizer</Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/tools/cover-letter">Cover Letter</Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/tools/twitter-thread">Twitter/X Thread</Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/tools/faq">FAQ Generator</Link>
-                </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link to="/tools/script">Script/Voiceover</Link>
-                </DropdownMenuItem>
+              <DropdownMenuContent className="w-72 max-h-[70vh] overflow-y-auto">
+                {TOOL_CATEGORIES.map((category, index) => {
+                  const isOpen = openCategoryId === category.id;
+                  return (
+                    <div key={category.id} className="py-1">
+                      <button
+                        type="button"
+                        className="flex w-full items-center justify-between px-2 py-1.5 text-xs font-bold uppercase tracking-wide text-muted-foreground hover:bg-accent focus:bg-accent"
+                        onClick={() => setOpenCategoryId(isOpen ? null : category.id)}
+                      >
+                        <span>{category.label}</span>
+                        <ChevronDown
+                          className={`h-3 w-3 transition-transform ${
+                            isOpen ? "rotate-180" : ""
+                          }`}
+                        />
+                      </button>
+                      {isOpen && (
+                        <div className="mt-1 space-y-1">
+                          {category.tools.map((tool) => (
+                            <DropdownMenuItem asChild key={tool.id}>
+                              <Link to={tool.path}>{tool.label}</Link>
+                            </DropdownMenuItem>
+                          ))}
+                        </div>
+                      )}
+                      {index < TOOL_CATEGORIES.length - 1 && <DropdownMenuSeparator />}
+                    </div>
+                  );
+                })}
               </DropdownMenuContent>
             </DropdownMenu>
 
@@ -103,15 +102,40 @@ export const SiteNav = () => {
                 <Link to="/dashboard">
                   <Button variant="outline" size="sm">Dashboard</Button>
                 </Link>
+                <Link to="/projects">
+                  <Button variant="outline" size="sm">Projects</Button>
+                </Link>
+                <Link to="/chat">
+                  <Button variant="outline" size="sm">Chat</Button>
+                </Link>
+                <Link to="/files">
+                  <Button variant="outline" size="sm">Files</Button>
+                </Link>
+                <Link to="/settings">
+                  <Button variant="outline" size="sm">Settings</Button>
+                </Link>
                 <Link to="/results">
                   <Button size="sm">Saved</Button>
                 </Link>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={async () => {
+                    try {
+                      if (supabase) {
+                        await supabase.auth.signOut();
+                        window.location.assign('/');
+                      }
+                    } catch (e) {
+                      console.error('[SiteNav] logout failed', e);
+                    }
+                  }}
+                >
+                  Logout
+                </Button>
               </>
             ) : (
               <>
-                <Link to="/pricing" className="hidden md:block font-bold hover:text-primary transition-colors">
-                  Pricing
-                </Link>
                 <Link to="/auth">
                   <Button variant="outline" size="sm">Sign In</Button>
                 </Link>

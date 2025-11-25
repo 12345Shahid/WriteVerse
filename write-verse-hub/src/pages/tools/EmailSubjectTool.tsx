@@ -15,6 +15,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Loader2, Sparkles } from "lucide-react";
+import { useBrandVoice } from "@/context/BrandVoiceContext";
 
 /**
  * Email Subject Line Generator Tool
@@ -80,6 +81,7 @@ interface Result {
 }
 
 const EmailSubjectTool = () => {
+  const { selectedVoiceId } = useBrandVoice();
   const [formData, setFormData] = useState({
     topic: "",
     audience: "general",
@@ -105,6 +107,7 @@ const EmailSubjectTool = () => {
         tool: "email_subject",
         inputs: formData,
         outputCount: 10,
+        brandVoiceId: selectedVoiceId,
       });
       console.debug("results.count", Array.isArray(data?.results) ? data.results.length : 0);
       setResults((data?.results ?? []) as Result[]);

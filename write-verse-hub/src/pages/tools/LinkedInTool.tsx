@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Loader2, Sparkles } from "lucide-react";
+import { useBrandVoice } from "@/context/BrandVoiceContext";
 
 /**
  * LinkedIn Post Generator Tool
@@ -47,6 +48,7 @@ interface Result {
 }
 
 const LinkedInTool = () => {
+  const { selectedVoiceId } = useBrandVoice();
   const [formData, setFormData] = useState({
     topic: "",
     industry: "technology",
@@ -88,6 +90,7 @@ const LinkedInTool = () => {
         tool: "linkedin",
         inputs: formData,
         outputCount: 3,
+        brandVoiceId: selectedVoiceId,
       });
       const arr = (data?.results ?? []) as Result[];
       console.debug("results.count", Array.isArray(arr) ? arr.length : 0);
