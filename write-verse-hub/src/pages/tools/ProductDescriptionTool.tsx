@@ -14,8 +14,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles, Lock } from "lucide-react";
 import { useBrandVoice } from "@/context/BrandVoiceContext";
+import { usePermissions } from "@/hooks/usePermissions";
+import { useModel } from "@/context/ModelContext";
 
 /**
  * Product Description Writer Tool
@@ -50,7 +52,9 @@ interface Result {
 }
 
 const ProductDescriptionTool = () => {
+  const { canGenerate, isViewer } = usePermissions();
   const { selectedVoiceId } = useBrandVoice();
+  const { selectedModelId } = useModel();
   const [formData, setFormData] = useState({
     productName: "",
     features: "",
@@ -62,6 +66,10 @@ const ProductDescriptionTool = () => {
   const [isLoading, setIsLoading] = useState(false);
 
   const handleGenerate = async () => {
+    if (!canGenerate) {
+      alert('Viewers cannot generate content');
+      return;
+    }
     if (!formData.productName.trim() || !formData.features.trim()) {
       alert("Please fill in product name and features");
       return;
@@ -77,6 +85,7 @@ const ProductDescriptionTool = () => {
         inputs: formData,
         outputCount: 3,
         brandVoiceId: selectedVoiceId,
+        modelId: selectedModelId,
       });
       const arr = (data?.results ?? []) as Result[];
       console.debug("results.count", Array.isArray(arr) ? arr.length : 0);
@@ -194,10 +203,18 @@ const ProductDescriptionTool = () => {
                   </Label>
                 </div>
 
+                {isViewer && (
+                  <div className="mb-4 p-3 bg-yellow-50 border-2 border-yellow-400 rounded flex items-start gap-2">
+                    <Lock className="w-4 h-4 text-yellow-600 mt-0.5" />
+                    <p className="text-sm text-yellow-700"><strong>Viewer:</strong> You cannot generate content</p>
+                  </div>
+                )}
+
                 <Button
                   onClick={handleGenerate}
-                  disabled={isLoading || !formData.productName.trim() || !formData.features.trim()}
-                  className="w-full bg-black text-white"
+                  disabled={isLoading || !formData.productName.trim() || !formData.features.trim() || isViewer}
+                  className={`w-full bg-black text-white ${isViewer ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  title={isViewer ? 'Viewers cannot generate content' : ''}
                   size="lg"
                 >
                   {isLoading ? (

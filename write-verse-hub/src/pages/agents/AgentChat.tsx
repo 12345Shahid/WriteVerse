@@ -103,8 +103,9 @@ export default function AgentChat() {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token;
+      const apiBase = import.meta.env.DEV ? (import.meta.env.VITE_API_URL || '') : '';
       
-      const res = await fetch(`${import.meta.env.VITE_API_URL || ''}/api/agents/chat`, {
+      const res = await fetch(`${apiBase}/api/agents/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

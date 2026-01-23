@@ -5,22 +5,32 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { generate, saveResults } from "@/lib/api";
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles, Lock } from "lucide-react";
+import { useModel } from "@/context/ModelContext";
+import { useBrandVoice } from "@/context/BrandVoiceContext";
+import { usePermissions } from "@/hooks/usePermissions";
 
 interface CoverOut { text: string; atsScore: string; openingHook: string; closing: string; }
 
 const CoverLetterTool = () => {
+  const { canGenerate, isViewer } = usePermissions();
+  const { selectedModelId } = useModel();
+  const { selectedVoiceId } = useBrandVoice();
   const [formData, setFormData] = useState({ jobTitle: "", company: "", achievement: "", hiringManager: "" });
   const [result, setResult] = useState<CoverOut | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   const handleGenerate = async () => {
+    if (!canGenerate) {
+      alert('Viewers cannot generate content');
+      return;
+    }
     if (!formData.jobTitle.trim() || !formData.company.trim()) { alert("Please fill job title and company"); return; }
     setIsLoading(true);
     console.groupCollapsed("[CoverLetterTool] Generate");
     console.debug("inputs", formData);
     try {
-      const data = await generate({ tool: "cover_letter", inputs: formData, outputCount: 1 });
+      const data = await generate({ tool: "cover_letter", inputs: formData, outputCount: 1, modelId: selectedModelId, brandVoiceId: selectedVoiceId });
       const out = (data?.results ?? null) as any;
       setResult(out as CoverOut);
       try {
@@ -57,7 +67,16 @@ const CoverLetterTool = () => {
                   <Label className="font-bold uppercase text-sm">Hiring Manager (optional)</Label>
                   <Input value={formData.hiringManager} onChange={(e)=>setFormData({...formData, hiringManager:e.target.value})} className="input-brutal"/>
                 </div>
-                <Button onClick={handleGenerate} disabled={isLoading || !formData.jobTitle.trim() || !formData.company.trim()} className="w-full bg-black text-white" size="lg">
+                {isViewer && (
+                  <div className="mb-4 p-3 bg-yellow-50 border-2 border-yellow-400 rounded flex items-start gap-2">
+                    <Lock className="w-4 h-4 text-yellow-600 mt-0.5" />
+                    <p className="text-sm text-yellow-700"><strong>Viewer:</strong> You cannot generate content</p>
+                  </div>
+                )}
+
+                <Button onClick={handleGenerate} disabled={isLoading || !formData.jobTitle.trim() || !formData.company.trim() || isViewer}
+                  className={isViewer ? 'opacity-50 cursor-not-allowed' : ''}
+                  title={isViewer ? 'Viewers cannot generate content' : ''} className="w-full bg-black text-white" size="lg">
                   {isLoading ? (<><Loader2 className="mr-2 h-5 w-5 animate-spin"/>Generating...</>) : (<><Sparkles className="mr-2 h-5 w-5"/>Generate Cover Letter</>)}
                 </Button>
               </div>

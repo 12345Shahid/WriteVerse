@@ -34,6 +34,8 @@ export async function recordUsage({
       return null;
     }
     
+    console.log(`[Meter] Recording usage for ${tool}: ${credits} credits`);
+
     const { data, error } = await supabaseAdmin.rpc('record_usage', {
       p_organization_id: organization_id,
       p_user_id: user_id,

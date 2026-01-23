@@ -14,8 +14,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles, Lock } from "lucide-react";
 import { useBrandVoice } from "@/context/BrandVoiceContext";
+import { useModel } from "@/context/ModelContext";
+import { usePermissions } from "@/hooks/usePermissions";
 
 /**
  * Email Subject Line Generator Tool
@@ -81,7 +83,9 @@ interface Result {
 }
 
 const EmailSubjectTool = () => {
+  const { canGenerate, isViewer } = usePermissions();
   const { selectedVoiceId } = useBrandVoice();
+  const { selectedModelId } = useModel();
   const [formData, setFormData] = useState({
     topic: "",
     audience: "general",
@@ -94,6 +98,10 @@ const EmailSubjectTool = () => {
   const [abTestId, setAbTestId] = useState<string | null>(null);
 
   const handleGenerate = async () => {
+    if (!canGenerate) {
+      alert('Viewers cannot generate content');
+      return;
+    }
     if (!formData.topic.trim()) {
       alert("Please enter an email topic");
       return;
@@ -108,6 +116,7 @@ const EmailSubjectTool = () => {
         inputs: formData,
         outputCount: 10,
         brandVoiceId: selectedVoiceId,
+        modelId: selectedModelId,
       });
       console.debug("results.count", Array.isArray(data?.results) ? data.results.length : 0);
       setResults((data?.results ?? []) as Result[]);
@@ -214,11 +223,19 @@ const EmailSubjectTool = () => {
                   </Select>
                 </div>
 
+                {isViewer && (
+                  <div className="mb-4 p-3 bg-yellow-50 border-2 border-yellow-400 rounded flex items-start gap-2">
+                    <Lock className="w-4 h-4 text-yellow-600 mt-0.5" />
+                    <p className="text-sm text-yellow-700"><strong>Viewer:</strong> You cannot generate content</p>
+                  </div>
+                )}
+
                 {/* Generate Button */}
                 <Button
                   onClick={handleGenerate}
-                  disabled={isLoading || !formData.topic.trim()}
-                  className="w-full bg-black text-white"
+                  disabled={isLoading || !formData.topic.trim() || isViewer}
+                  className={`w-full bg-black text-white ${isViewer ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  title={isViewer ? 'Viewers cannot generate content' : ''}
                   size="lg"
                 >
                   {isLoading ? (

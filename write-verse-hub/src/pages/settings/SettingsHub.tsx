@@ -1,6 +1,6 @@
 import { ToolLayout } from '@/components/tool/ToolLayout';
 import { useNavigate } from 'react-router-dom';
-import { Users, Tags, Bot, GitFork, LayoutTemplate, Megaphone, BookOpen } from 'lucide-react';
+import { Users, Tags, Bot, GitFork, LayoutTemplate, Megaphone, BookOpen, Code, BarChart, Link as LinkIcon, PenTool } from 'lucide-react';
 
 export default function SettingsHub() {
     const navigate = useNavigate();
@@ -16,6 +16,17 @@ export default function SettingsHub() {
                     </div>
                     <h3 className="text-2xl font-black uppercase mb-2">Team Management</h3>
                     <p className="text-muted-foreground font-medium">Manage members, roles, and workspace settings.</p>
+                </div>
+
+                <div 
+                  className="border-4 border-black p-6 bg-white shadow-brutal hover:translate-y-1 transition-transform cursor-pointer flex flex-col items-center text-center"
+                  onClick={() => navigate('/analytics')}
+                >
+                    <div className="bg-red-100 w-16 h-16 flex items-center justify-center border-2 border-black mb-4 rounded-full">
+                        <BarChart className="h-8 w-8 text-black"/>
+                    </div>
+                    <h3 className="text-2xl font-black uppercase mb-2">Analytics</h3>
+                    <p className="text-muted-foreground font-medium">View credit usage history and spending.</p>
                 </div>
 
                 <div 
@@ -82,6 +93,39 @@ export default function SettingsHub() {
                     </div>
                     <h3 className="text-2xl font-black uppercase mb-2">Brand Voice</h3>
                     <p className="text-muted-foreground font-medium">Manage brand voices and tone guidelines.</p>
+                </div>
+
+                <div 
+                  className="border-4 border-black p-6 bg-white shadow-brutal hover:translate-y-1 transition-transform cursor-pointer flex flex-col items-center text-center"
+                  onClick={() => navigate('/settings/embed')}
+                >
+                    <div className="bg-indigo-100 w-16 h-16 flex items-center justify-center border-2 border-black mb-4 rounded-full">
+                        <Code className="h-8 w-8 text-black"/>
+                    </div>
+                    <h3 className="text-2xl font-black uppercase mb-2">Embed Chatbot</h3>
+                    <p className="text-muted-foreground font-medium">Get code to add an AI assistant to your website.</p>
+                </div>
+
+                <div 
+                  className="border-4 border-black p-6 bg-white shadow-brutal hover:translate-y-1 transition-transform cursor-pointer flex flex-col items-center text-center"
+                  onClick={() => navigate('/seo')}
+                >
+                    <div className="bg-gradient-to-br from-purple-100 to-blue-100 w-16 h-16 flex items-center justify-center border-2 border-black mb-4 rounded-full">
+                        <PenTool className="h-8 w-8 text-black"/>
+                    </div>
+                    <h3 className="text-2xl font-black uppercase mb-2">Blog Studio</h3>
+                    <p className="text-muted-foreground font-medium">SEO keyword research & AI-powered blog writing.</p>
+                </div>
+
+                <div 
+                  className="border-4 border-black p-6 bg-white shadow-brutal hover:translate-y-1 transition-transform cursor-pointer flex flex-col items-center text-center"
+                  onClick={() => navigate('/settings/integrations')}
+                >
+                    <div className="bg-teal-100 w-16 h-16 flex items-center justify-center border-2 border-black mb-4 rounded-full">
+                        <LinkIcon className="h-8 w-8 text-black"/>
+                    </div>
+                    <h3 className="text-2xl font-black uppercase mb-2">Integrations</h3>
+                    <p className="text-muted-foreground font-medium">Connect Notion, Slack, HubSpot and 130+ apps.</p>
                 </div>
             </div>
         </ToolLayout>

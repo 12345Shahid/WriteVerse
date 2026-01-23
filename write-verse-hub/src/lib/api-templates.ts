@@ -59,11 +59,11 @@ export async function deleteTemplate(id: string): Promise<void> {
   if (!res.ok) throw new Error('Failed to delete template');
 }
 
-export async function generateFromTemplate(templateId: string, inputs: Record<string, any>): Promise<any[]> {
+export async function generateFromTemplate(templateId: string, inputs: Record<string, any>, brandVoiceId?: string): Promise<any[]> {
   const res = await fetch(`${API_PREFIX}/generate-template`, {
     method: 'POST',
     headers: await getCommonHeaders(),
-    body: JSON.stringify({ templateId, inputs }),
+    body: JSON.stringify({ templateId, inputs, brandVoiceId }),
   });
   if (!res.ok) throw new Error('Failed to generate');
   const data = await res.json();

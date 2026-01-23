@@ -13,8 +13,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, Sparkles, Copy, Check } from "lucide-react";
+import { Loader2, Sparkles, Copy, Check, Lock } from "lucide-react";
 import { useBrandVoice } from "@/context/BrandVoiceContext";
+import { usePermissions } from "@/hooks/usePermissions";
+import { useModel } from "@/context/ModelContext";
 
 /**
  * Job Description Generator Tool
@@ -42,7 +44,9 @@ import { useBrandVoice } from "@/context/BrandVoiceContext";
  */
 
 const JobDescriptionTool = () => {
+  const { canGenerate, isViewer } = usePermissions();
   const { selectedVoiceId } = useBrandVoice();
+  const { selectedModelId } = useModel();
   const [formData, setFormData] = useState({
     roleTitle: "",
     responsibilities: "",
@@ -63,6 +67,10 @@ const JobDescriptionTool = () => {
   const [copied, setCopied] = useState(false);
 
   const handleGenerate = async () => {
+    if (!canGenerate) {
+      alert('Viewers cannot generate content');
+      return;
+    }
     if (!formData.roleTitle.trim() || !formData.responsibilities.trim()) {
       alert("Please fill in role title and responsibilities");
       return;
@@ -78,6 +86,7 @@ const JobDescriptionTool = () => {
         inputs: formData,
         outputCount: 1,
         brandVoiceId: selectedVoiceId,
+        modelId: selectedModelId,
       });
       const obj = (data?.results ?? null) as any;
       console.debug("has.sections", !!obj && typeof obj === 'object');
@@ -204,9 +213,18 @@ const JobDescriptionTool = () => {
                   </Select>
                 </div>
 
+                {isViewer && (
+                  <div className="mb-4 p-3 bg-yellow-50 border-2 border-yellow-400 rounded flex items-start gap-2">
+                    <Lock className="w-4 h-4 text-yellow-600 mt-0.5" />
+                    <p className="text-sm text-yellow-700"><strong>Viewer:</strong> You cannot generate content</p>
+                  </div>
+                )}
+
                 <Button
                   onClick={handleGenerate}
-                  disabled={isLoading || !formData.roleTitle.trim() || !formData.responsibilities.trim()}
+                  disabled={isLoading || !formData.roleTitle.trim() || !formData.responsibilities.trim() || isViewer}
+                  className={isViewer ? 'opacity-50 cursor-not-allowed' : ''}
+                  title={isViewer ? 'Viewers cannot generate content' : ''}
                   className="w-full bg-black text-white"
                   size="lg"
                 >

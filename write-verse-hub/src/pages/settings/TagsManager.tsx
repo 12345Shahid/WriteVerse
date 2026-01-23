@@ -3,13 +3,15 @@ import { ToolLayout } from '@/components/tool/ToolLayout';
 import { getCommonHeaders } from '@/lib/api';
 import { Button } from '@/components/ui/button-brutal';
 import { Input } from '@/components/ui/input';
-import { Trash2, Edit2, Plus, Tag } from 'lucide-react';
+import { Trash2, Edit2, Plus, Tag, Lock } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { usePermissions } from '@/hooks/usePermissions';
 
 interface TagModel { id: string; name: string; }
 
 export default function TagsManager() {
+  const { canEdit, isViewer } = usePermissions();
   const { toast } = useToast();
   const [tags, setTags] = useState<TagModel[]>([]);
   const [loading, setLoading] = useState(true);
@@ -31,12 +33,16 @@ export default function TagsManager() {
   };
 
   const createTag = async () => {
+      if (!canEdit) {
+          toast({ title: "Access Denied", description: "Viewers cannot create tags", variant: "destructive" });
+          return;
+      }
       if (!newTagName.trim()) return;
       try {
           const res = await fetch('/api/tags', {
               method: 'POST',
               headers: await getCommonHeaders(),
-              body: JSON.stringify({ name: newTagName })
+              body: JSON.stringify({ name: newTagName, type: 'project' })
           });
           if (res.ok) {
               setNewTagName('');
@@ -47,6 +53,7 @@ export default function TagsManager() {
   };
 
   const updateTag = async () => {
+      if (!canEdit) return;
       if (!editTag || !editName.trim()) return;
       try {
           const res = await fetch(`/api/tags/${editTag.id}`, {
@@ -63,6 +70,7 @@ export default function TagsManager() {
   };
 
   const deleteTag = async (id: string) => {
+      if (!canEdit) return;
       if (!confirm("Delete this tag? It will be removed from all files/projects.")) return;
       try {
           const res = await fetch(`/api/tags/${id}`, { method: 'DELETE', headers: await getCommonHeaders() });
@@ -77,10 +85,26 @@ export default function TagsManager() {
       <ToolLayout title="Tags Management" description="Organize your workspace with tags">
           <div className="max-w-3xl mx-auto">
               <div className="bg-white border-4 border-black p-6 shadow-brutal mb-8">
+                  {isViewer && (
+                    <div className="mb-4 p-3 bg-yellow-50 border-2 border-yellow-400 rounded flex items-start gap-2">
+                      <Lock className="w-4 h-4 text-yellow-600 mt-0.5" />
+                      <p className="text-sm text-yellow-700"><strong>Viewer:</strong> You can only view tags, not manage them</p>
+                    </div>
+                  )}
                   <h3 className="font-bold text-lg mb-4">Create New Tag</h3>
                   <div className="flex gap-2">
-                      <Input placeholder="Tag Name (e.g. Urgent, Marketing)" value={newTagName} onChange={e => setNewTagName(e.target.value)} />
-                      <Button onClick={createTag}><Plus className="mr-2 h-4 w-4"/> Create</Button>
+                      <Input 
+                        placeholder="Tag Name (e.g. Urgent, Marketing)" 
+                        value={newTagName} 
+                        onChange={e => setNewTagName(e.target.value)}
+                        disabled={isViewer}
+                      />
+                      <Button 
+                        onClick={createTag}
+                        disabled={isViewer}
+                        className={isViewer ? 'opacity-50 cursor-not-allowed' : ''}
+                        title={isViewer ? 'Viewers cannot create tags' : ''}
+                      ><Plus className="mr-2 h-4 w-4"/> Create</Button>
                   </div>
               </div>
 
@@ -92,10 +116,22 @@ export default function TagsManager() {
                               <span className="font-bold">{tag.name}</span>
                           </div>
                           <div className="flex gap-2">
-                              <Button size="sm" variant="outline" onClick={() => { setEditTag(tag); setEditName(tag.name); }}>
+                              <Button 
+                                size="sm" 
+                                variant="outline" 
+                                onClick={() => { setEditTag(tag); setEditName(tag.name); }}
+                                disabled={isViewer}
+                                className={isViewer ? 'opacity-50 cursor-not-allowed' : ''}
+                              >
                                   <Edit2 className="h-4 w-4"/>
                               </Button>
-                              <Button size="sm" variant="destructive" onClick={() => deleteTag(tag.id)}>
+                              <Button 
+                                size="sm" 
+                                variant="destructive" 
+                                onClick={() => deleteTag(tag.id)}
+                                disabled={isViewer}
+                                className={isViewer ? 'opacity-50 cursor-not-allowed' : ''}
+                              >
                                   <Trash2 className="h-4 w-4"/>
                               </Button>
                           </div>

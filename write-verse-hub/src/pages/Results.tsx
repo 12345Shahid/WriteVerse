@@ -88,25 +88,110 @@ const Results = () => {
     if (Array.isArray(r)) {
       return (
         <div className="space-y-3">
-          {r.map((row: any, idx: number) => (
-            <div key={idx} className="border-2 border-black p-3 bg-muted">
-              {typeof row === 'string' ? (
-                <pre className="whitespace-pre-wrap text-sm">{row}</pre>
-              ) : (
-                <>
-                  {Object.entries(row || {}).map(([k, v]) => (
-                    <div key={k} className="text-sm font-medium">
-                      <span className="uppercase text-xs font-bold mr-2">{k}:</span>
-                      <span>{String(v)}</span>
-                    </div>
+          {r.map((row: any, idx: number) => {
+            // Handle objects with just a text field (helper tools)
+            if (typeof row === 'object' && row !== null && typeof row.text === 'string') {
+              // Check if text is JSON that needs parsing
+              let displayText = row.text;
+              if (displayText.trim().startsWith('{') || displayText.trim().startsWith('[')) {
+                try {
+                  const parsed = JSON.parse(displayText);
+                  // If it's a response array, extract the text values
+                  if (parsed.response && Array.isArray(parsed.response)) {
+                    displayText = parsed.response.map((item: any) => item.text || item.content || '').join('\n\n---\n\n');
+                  } else if (Array.isArray(parsed)) {
+                    displayText = parsed.map((item: any) => item.text || item.content || String(item)).join('\n\n---\n\n');
+                  }
+                } catch {
+                  // Keep original text if not valid JSON
+                }
+              }
+              return (
+                <div key={idx} className="border-2 border-black p-3 bg-muted">
+                  <div className="text-xs font-bold uppercase mb-2">Variation #{idx + 1}</div>
+                  <p className="whitespace-pre-wrap text-sm">{displayText}</p>
+                </div>
+              );
+            }
+            
+            return (
+              <div key={idx} className="border-2 border-black p-3 bg-muted">
+                {typeof row === 'string' ? (
+                  <pre className="whitespace-pre-wrap text-sm">{row}</pre>
+                ) : (
+                  <>
+                    {Object.entries(row || {}).map(([k, v]) => (
+                      <div key={k} className="text-sm font-medium">
+                        <span className="uppercase text-xs font-bold mr-2">{k}:</span>
+                        <span className="whitespace-pre-wrap">{String(v)}</span>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+    
+    // Handle structured objects (blog posts, articles, etc.)
+    if (typeof r === 'object' && r !== null) {
+      // Check for long-form content with body field
+      if (r.body || r.text || r.content) {
+        const title = r.title || r.headline || r.optimized_title || '';
+        const body = r.body || r.text || r.content || r.optimized_body || '';
+        const outline = r.outline || r.suggested_headings || [];
+        const metaDesc = r.meta_description || r.optimized_meta_description || r.summary || '';
+        
+        return (
+          <article className="border-2 border-black bg-background p-4 space-y-4">
+            {title && (
+              <header>
+                <h2 className="text-xl font-bold">{title}</h2>
+                {metaDesc && <p className="text-sm text-muted-foreground mt-1">{metaDesc}</p>}
+              </header>
+            )}
+            {Array.isArray(outline) && outline.length > 0 && (
+              <div className="border-2 border-black bg-muted p-3">
+                <div className="text-xs font-bold uppercase mb-2">Outline</div>
+                <ul className="list-disc pl-5 space-y-1">
+                  {outline.map((h: string, i: number) => (
+                    <li key={i} className="text-sm">{h}</li>
                   ))}
-                </>
+                </ul>
+              </div>
+            )}
+            <div className="prose max-w-none whitespace-pre-wrap text-sm leading-relaxed">
+              {body}
+            </div>
+          </article>
+        );
+      }
+      
+      // For other objects, display fields nicely
+      return (
+        <div className="border-2 border-black bg-background p-4 space-y-3">
+          {Object.entries(r).map(([key, value]) => (
+            <div key={key}>
+              <div className="text-xs font-bold uppercase text-muted-foreground mb-1">{key.replace(/_/g, ' ')}</div>
+              {Array.isArray(value) ? (
+                <ul className="list-disc pl-5 space-y-1">
+                  {value.map((item: any, i: number) => (
+                    <li key={i} className="text-sm">{typeof item === 'object' ? JSON.stringify(item) : String(item)}</li>
+                  ))}
+                </ul>
+              ) : typeof value === 'object' && value !== null ? (
+                <pre className="text-sm bg-muted p-2">{JSON.stringify(value, null, 2)}</pre>
+              ) : (
+                <div className="text-sm whitespace-pre-wrap">{String(value)}</div>
               )}
             </div>
           ))}
         </div>
       );
     }
+    
     return (
       <pre className="whitespace-pre-wrap font-mono text-sm p-4 border-2 border-black bg-background">
         {JSON.stringify(r, null, 2)}

@@ -1,0 +1,62 @@
+# Walkthrough: AI Humanizer & Detector
+
+## Deployment Complete ✅
+
+**Production:** https://writehubai.halal-solutions.com
+
+**Access:** `/ai-tools`
+
+---
+
+## What Was Built
+
+### 1. AI Detector
+Analyzes text to determine if AI-generated.
+
+**Metrics:**
+- Burstiness (sentence length variation)
+- Vocabulary diversity
+- AI pattern detection (filler phrases)
+- LLM analysis (50% weight)
+
+**Scores:** Human % vs AI %
+
+---
+
+### 2. AI Humanizer
+Rewrites AI text to sound human.
+
+**5 Styles:**
+| Style | Description |
+|-------|-------------|
+| Standard | Natural, conversational |
+| Academic | Scholarly, formal |
+| Simple | Easy to understand |
+| Formal | Professional tone |
+| Creative | Engaging, vivid |
+
+**Freeze List:** Protect specific words from modification.
+
+---
+
+## Files Created
+
+| File | Description |
+|------|-------------|
+| [detect.ts](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/api/ai-tools/detect.ts) | Detection API |
+| [humanize.ts](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/api/ai-tools/humanize.ts) | Humanizer API |
+| [AITools.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/pages/AITools.tsx) | Frontend UI |
+
+---
+
+## Cost
+
+**$0** - Uses existing OpenRouter API
+
+---
+
+## How to Test
+
+1. Go to `/ai-tools`
+2. **Detect:** Paste text → Click "Detect AI"
+3. **Humanize:** Paste AI text → Select style → Click "Humanize"

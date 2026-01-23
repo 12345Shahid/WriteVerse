@@ -20,6 +20,7 @@ export async function generate(params: {
   outputCount?: number;
   tone?: string;
   brandVoiceId?: string;
+  modelId?: string;
 }) {
   const started = performance.now();
   const userId = await getUserId();
@@ -29,6 +30,7 @@ export async function generate(params: {
     outputCount: params.outputCount ?? 3,
     tone: params.tone,
     brandVoiceId: params.brandVoiceId,
+    modelId: params.modelId,
   };
 
   console.groupCollapsed('[API] POST /api/generate');
@@ -287,6 +289,77 @@ export async function createCheckoutSession(amountUsd: number) {
     return json as { url: string };
   } catch (err) {
     console.error('[API] /api/checkout/session error', err);
+    throw err;
+  } finally {
+    console.groupEnd();
+  }
+}
+
+export async function createSubscriptionSession(planCode: string, billingInterval: 'monthly' | 'yearly') {
+  const userId = await getUserId();
+  // Get org ID manually since it is required in the body
+  const organizationId = typeof window !== 'undefined' ? window.localStorage.getItem('writerai_active_team') : null;
+
+  console.groupCollapsed('[API] POST /api/subscriptions/checkout-trial');
+  console.debug('headers.x-user-id', userId || '(none)');
+  console.debug('plan', planCode, 'billing', billingInterval, 'org', organizationId);
+  try {
+    const res = await fetch('/api/subscriptions/checkout-trial', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(userId ? { 'X-User-Id': userId } : {}),
+      },
+      body: JSON.stringify({ 
+        organizationId, 
+        plan: planCode, // Map planCode -> plan
+        billing: billingInterval 
+      }),
+    });
+    const text = await res.text();
+    let json: any = null;
+    try { json = JSON.parse(text); } catch {}
+    console.debug('response.status', res.status);
+    console.debug('response.body', json ?? text.slice(0, 500));
+    if (!res.ok) throw new Error(json?.message || json?.error || `HTTP ${res.status}`);
+    return json as { url: string };
+  } catch (err: any) {
+    console.error('[API] /api/subscriptions/checkout-trial error', err);
+    throw err;
+  } finally {
+    console.groupEnd();
+  }
+}
+
+export async function confirmSubscription(sessionId: string) {
+  const userId = await getUserId();
+  console.groupCollapsed('[API] POST /api/billing/subscription/confirm');
+  console.debug('headers.x-user-id', userId || '(none)');
+  console.debug('sessionId', sessionId);
+  try {
+    const res = await fetch('/api/billing/subscription/confirm', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(userId ? { 'X-User-Id': userId } : {}),
+      },
+      body: JSON.stringify({ sessionId }),
+    });
+    const text = await res.text();
+    let json: any = null;
+    try { json = JSON.parse(text); } catch {}
+    console.debug('response.status', res.status);
+    console.debug('response.body', json ?? text.slice(0, 500));
+    if (!res.ok) throw new Error(json?.message || `HTTP ${res.status}`);
+    return json as {
+      ok: boolean;
+      status?: string;
+      plan_code?: string | null;
+      trial_credits_added?: number;
+      trial_end?: string | null;
+    };
+  } catch (err) {
+    console.error('[API] /api/billing/subscription/confirm error', err);
     throw err;
   } finally {
     console.groupEnd();

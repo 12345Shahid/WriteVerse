@@ -8,11 +8,13 @@ import { Textarea } from '@/components/ui/textarea';
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from "@/components/ui/card";
 import { ArrowLeft, Loader2, Copy, Check } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
+import { useBrandVoice } from '@/context/BrandVoiceContext';
 
 export default function TemplateRunner() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { selectedVoiceId } = useBrandVoice();
   const [template, setTemplate] = useState<ContentTemplate | null>(null);
   const [inputs, setInputs] = useState<Record<string, any>>({});
   const [results, setResults] = useState<any[]>([]);
@@ -36,7 +38,7 @@ export default function TemplateRunner() {
     setLoading(true);
     setResults([]);
     try {
-        const res = await generateFromTemplate(template.id, inputs);
+        const res = await generateFromTemplate(template.id, inputs, selectedVoiceId);
         setResults(res);
     } catch(e) {
         toast({ title: "Generation Failed", description: "Please try again.", variant: "destructive" });

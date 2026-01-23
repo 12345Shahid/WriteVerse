@@ -1,0 +1,861 @@
+import { getSupabaseAdmin } from './supabase.js';
+import { chatWithAgent } from './agents.js';
+
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+const OPENROUTER_MODEL = 'google/gemini-2.0-flash-001';
+
+// OpenRouter API call function
+async function callOpenRouter(prompt: string, temperature: number = 0.9): Promise<string> {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+            'HTTP-Referer': 'https://writerai.app',
+            'X-Title': 'WriterAI Workflow',
+        },
+        body: JSON.stringify({
+            model: OPENROUTER_MODEL,
+            messages: [{ role: 'user', content: prompt }],
+            max_tokens: 8192,
+            temperature,
+        }),
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OpenRouter error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || '';
+}
+
+function resolveVariable(path: string, context: any) {
+    const parts = path.split('.');
+    const stepId = parts[0];
+    
+    if (stepId === 'initial' && context.initial) {
+        let val = context.initial;
+        for (let i = 1; i < parts.length; i++) {
+            if (val) val = val[parts[i]];
+        }
+        return val;
+    }
+
+    if (context[stepId]) {
+        let val = context[stepId];
+        for (let i = 1; i < parts.length; i++) {
+            if (val) val = val[parts[i]];
+        }
+        return val;
+    }
+    return null;
+}
+
+function resolveInputs(params: any, inputMap: any, context: any, loopItem: any = null) {
+  const resolved: any = { ...params };
+  
+  for (const [key, valueTemplate] of Object.entries(inputMap || {})) {
+    if (typeof valueTemplate === 'string') {
+      resolved[key] = valueTemplate.replace(/\{\{([^}]+)\}\}/g, (match, path) => {
+        const cleanPath = path.trim();
+        if (cleanPath === 'loop.item' && loopItem !== null) {
+            return String(loopItem);
+        }
+        
+        const val = resolveVariable(cleanPath, context);
+        if (val !== null && val !== undefined) {
+             if (typeof val === 'object') return JSON.stringify(val);
+             return String(val);
+        }
+        return match;
+      });
+    } else {
+      resolved[key] = valueTemplate;
+    }
+  }
+  return resolved;
+}
+
+function evaluateCondition(condition: string, context: any): boolean {
+    if (!condition) return true;
+    
+    let left = '';
+    let operator = '';
+    let right = '';
+
+    if (condition.includes(' contains ')) {
+        [left, right] = condition.split(' contains ');
+        operator = 'contains';
+    } else if (condition.includes(' == ')) {
+        [left, right] = condition.split(' == ');
+        operator = '==';
+    } else if (condition.includes(' != ')) {
+        [left, right] = condition.split(' != ');
+        operator = '!=';
+    } else {
+        return true;
+    }
+
+    let leftVal = left.trim();
+    if (leftVal.startsWith('{{') && leftVal.endsWith('}}')) {
+        leftVal = resolveVariable(leftVal.slice(2, -2).trim(), context);
+    }
+    
+    let rightVal = right.trim();
+    if (rightVal.startsWith('"') || rightVal.startsWith("'")) rightVal = rightVal.slice(1, -1);
+    else if (rightVal.startsWith('{{') && rightVal.endsWith('}}')) {
+        rightVal = resolveVariable(rightVal.slice(2, -2).trim(), context);
+    }
+
+    if (operator === 'contains') {
+        return String(leftVal || '').toLowerCase().includes(String(rightVal || '').toLowerCase());
+    }
+    if (operator === '==') return String(leftVal) === String(rightVal);
+    if (operator === '!=') return String(leftVal) !== String(rightVal);
+
+    return true;
+}
+
+/**
+ * Execute a single workflow
+ */
+export async function runWorkflow(workflowId: string, userId: string, orgId: string, initialInputs: any, brandVoiceId?: string) {
+  const supabaseAdmin = getSupabaseAdmin();
+  
+  if (!supabaseAdmin) throw new Error('Server misconfigured');
+
+  // 1. Create Execution Record
+  const { data: execution, error: createError } = await supabaseAdmin
+    .from('workflow_executions')
+    .insert({
+      workflow_id: workflowId,
+      organization_id: orgId,
+      user_id: userId,
+      status: 'running',
+      results: {},
+      current_step_index: 0
+    })
+    .select()
+    .single();
+
+  if (createError) throw createError;
+
+  const executionId = execution.id;
+
+  try {
+    // 2. Fetch Workflow Definition
+    const { data: workflow } = await supabaseAdmin
+      .from('workflows')
+      .select('steps')
+      .eq('id', workflowId)
+      .single();
+      
+    if (!workflow) throw new Error('Workflow not found');
+
+    const steps = workflow.steps || [];
+    if (steps.length > 6) {
+        throw new Error("Workflow limit exceeded: Maximum 6 steps allowed.");
+    }
+
+    // Credits: 1 credit per step (simple baseline)
+    const creditsCharged = Math.max(1, steps.length);
+    let orgCreditsBalance: number | null = null;
+    try {
+      const { data } = await supabaseAdmin
+        .from('organization_credits')
+        .select('balance_credits')
+        .eq('organization_id', orgId)
+        .maybeSingle();
+
+      if (data && typeof data.balance_credits === 'number') {
+        orgCreditsBalance = data.balance_credits;
+        if (data.balance_credits < creditsCharged) {
+          throw new Error('INSUFFICIENT_CREDITS');
+        }
+      }
+    } catch (e: any) {
+      if (String(e?.message || e) === 'INSUFFICIENT_CREDITS') {
+        throw new Error('Not enough credits to run this workflow');
+      }
+    }
+
+    // Fetch brand voice context if provided
+    let brandContext = '';
+    if (brandVoiceId) {
+      try {
+        const { data: voice } = await supabaseAdmin
+          .from('brand_voices')
+          .select('*, brand_voice_samples(*)')
+          .eq('id', brandVoiceId)
+          .single();
+
+        if (voice) {
+          const rules = (voice as any).rules || {};
+          const dos = Array.isArray(rules.dos) ? rules.dos.join(', ') : '';
+          const donts = Array.isArray(rules.donts) ? rules.donts.join(', ') : '';
+          const samples = (voice as any).brand_voice_samples?.map((s: any) => s.content).join('\n---\n') || '';
+
+          brandContext = `\n\n*** BRAND VOICE INSTRUCTIONS ***\nYou must adhere to the following Brand Voice profile:\n- Name: ${voice.name}\n- Description: ${voice.description || 'N/A'}\n- Tone: ${(voice as any).tone_tags?.join(', ') || 'N/A'}\n- DO: ${dos}\n- DON'T: ${donts}\n\n${samples ? `Style Samples (emulate this writing style):\n${samples}\n` : ''}*** END BRAND VOICE ***\n\n`;
+        }
+      } catch (e) {
+        console.warn('[Workflow] Failed to fetch brand voice', e);
+      }
+    }
+
+    console.log('[Workflow] Brand voice check', {
+      brandVoiceId: brandVoiceId || 'none',
+      hasBrandContext: brandContext.length > 0,
+    });
+
+    const context: any = {
+        initial: initialInputs // Access via {{initial.topic}}
+    };
+
+    // 3. Execute Steps
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      
+      await supabaseAdmin
+        .from('workflow_executions')
+        .update({ current_step_index: i })
+        .eq('id', executionId);
+
+      // Condition Check
+      if (step.if) {
+          const shouldRun = evaluateCondition(step.if, context);
+          if (!shouldRun) {
+              continue;
+          }
+      }
+
+      // Loop Check
+      if (step.loop) {
+          let iterations: any[] = [];
+          if (step.loop.count) {
+              iterations = Array.from({ length: Number(step.loop.count) }, (_, idx) => idx);
+          } else if (step.loop.items && typeof step.loop.items === 'string' && step.loop.items.startsWith('{{')) {
+              const list = resolveVariable(step.loop.items.slice(2, -2).trim(), context);
+              if (Array.isArray(list)) iterations = list;
+          }
+          
+          if (iterations.length > 10) iterations = iterations.slice(0, 10);
+
+          const loopResults = [];
+          for (const item of iterations) {
+              const inputs = resolveInputs(step.params, step.input_map, context, item);
+              const res = await executeToolStep(step.tool, inputs, { userId, orgId, brandContext });
+              loopResults.push(res);
+          }
+          context[step.id] = loopResults;
+      } else {
+          const inputs = resolveInputs(step.params, step.input_map, context);
+          const result = await executeToolStep(step.tool, inputs, { userId, orgId, brandContext });
+          context[step.id] = result;
+      }
+      
+      await supabaseAdmin
+        .from('workflow_executions')
+        .update({ results: context })
+        .eq('id', executionId);
+    }
+
+    // 4. Complete
+    await supabaseAdmin
+      .from('workflow_executions')
+      .update({ 
+        status: 'completed', 
+        completed_at: new Date().toISOString() 
+      })
+      .eq('id', executionId);
+
+    // Credits: deduct + log usage event for Analytics
+    if (orgCreditsBalance !== null) {
+      try {
+        const newBalance = Math.max(0, Number(orgCreditsBalance) - Number(creditsCharged));
+        await supabaseAdmin
+          .from('organization_credits')
+          .update({ balance_credits: newBalance })
+          .eq('organization_id', orgId);
+      } catch (e: any) {
+        console.warn('[Workflow] Organization credits deduction failed', e?.message || e);
+      }
+    }
+
+    try {
+      await supabaseAdmin
+        .from('usage_events')
+        .insert({
+          user_id: userId,
+          organization_id: orgId,
+          tool: `workflow:${workflowId}`,
+          credits: creditsCharged,
+          metadata: { steps: steps.map((s: any) => ({ id: s.id, tool: s.tool })) },
+        });
+    } catch (e: any) {
+      console.warn('[Workflow] usage_events insert failed', e?.message || e);
+    }
+
+    return { success: true, results: context };
+
+  } catch (err: any) {
+    // Log Failure
+    await supabaseAdmin
+      .from('workflow_executions')
+      .update({ 
+        status: 'failed', 
+        error: err.message 
+      })
+      .eq('id', executionId);
+    
+    // Return error result instead of undefined
+    return { success: false, error: err.message, results: {} };
+  }
+}
+
+function parseJSONSafe(text: string) {
+  const sanitizeJsonText = (input: string) => {
+    // Escape control characters only when they appear inside JSON string literals.
+    // This handles occasional model outputs that contain raw newlines/tabs inside quoted strings.
+    let out = '';
+    let inString = false;
+    let escape = false;
+
+    for (let i = 0; i < input.length; i++) {
+      const ch = input[i];
+
+      if (!inString) {
+        if (ch === '"') inString = true;
+        out += ch;
+        continue;
+      }
+
+      // inString
+      if (escape) {
+        out += ch;
+        escape = false;
+        continue;
+      }
+
+      if (ch === '\\') {
+        out += ch;
+        escape = true;
+        continue;
+      }
+
+      if (ch === '"') {
+        out += ch;
+        inString = false;
+        continue;
+      }
+
+      // Raw control characters inside a JSON string are invalid.
+      if (ch === '\n') {
+        out += '\\n';
+        continue;
+      }
+      if (ch === '\r') {
+        out += '\\r';
+        continue;
+      }
+      if (ch === '\t') {
+        out += '\\t';
+        continue;
+      }
+      if (ch === '\f') {
+        out += '\\f';
+        continue;
+      }
+      if (ch === '\b') {
+        out += '\\b';
+        continue;
+      }
+
+      const code = ch.charCodeAt(0);
+      if (code >= 0 && code <= 0x1f) {
+        // Drop other control characters to avoid JSON.parse failure.
+        continue;
+      }
+
+      out += ch;
+    }
+
+    return out;
+  };
+
+  let clean = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+  try {
+    return JSON.parse(clean);
+  } catch (e) {
+    try {
+      return JSON.parse(sanitizeJsonText(clean));
+    } catch {}
+
+    const firstOpen = clean.indexOf('{');
+    const firstArray = clean.indexOf('[');
+    let start = -1;
+    let end = -1;
+    
+    if (firstOpen !== -1 && (firstArray === -1 || firstOpen < firstArray)) {
+        start = firstOpen;
+        end = clean.lastIndexOf('}');
+    } else if (firstArray !== -1) {
+        start = firstArray;
+        end = clean.lastIndexOf(']');
+    }
+    
+    if (start !== -1 && end !== -1) {
+        const substring = clean.substring(start, end + 1);
+        try {
+            return JSON.parse(substring);
+        } catch (e2) {
+            try {
+              return JSON.parse(sanitizeJsonText(substring));
+            } catch {}
+        }
+    }
+    throw e;
+  }
+}
+
+// Reuse prompt logic (simplified for workflow context)
+async function executeToolStep(tool: string, inputs: any, meta: { userId: string, orgId: string, brandContext?: string }) {
+  if (tool === 'custom_agent') {
+      const { agentId, message } = inputs;
+      if (!agentId || !message) throw new Error("Agent ID and Message required for custom agent step");
+      if (typeof agentId !== 'string') throw new Error("Agent ID must be a string UUID");
+      if (agentId.includes('INSERT_AGENT_UUID_HERE')) {
+        throw new Error("Invalid Agent ID: please paste a real agent UUID from the Agents page");
+      }
+      const uuidLike = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidLike.test(agentId.trim())) {
+        throw new Error("Invalid Agent ID format: expected UUID (example: 00000000-0000-0000-0000-000000000000)");
+      }
+      try {
+        const result = await chatWithAgent(meta.userId, meta.orgId, agentId.trim(), message);
+        // Strip markdown from agent response
+        if (result && typeof result === 'object' && typeof result.response === 'string') {
+          result.response = stripBasicMarkdown(result.response);
+        }
+        return result;
+      } catch (e: any) {
+        throw new Error(`Agent step failed (agentId=${agentId}): ${e?.message || e}`);
+      }
+  }
+
+  console.log('[Workflow] Using OpenRouter for tool:', tool);
+  
+  const tone = inputs.tone || '';
+  const outputCount = inputs.outputCount || 3;
+  
+  let prompt = "";
+  
+  switch (tool) {
+    case 'email_subject':
+      prompt = `Generate ${outputCount} email subject lines for: ${inputs.topic}\nTarget audience: ${inputs.audience}\nGoal: Maximize ${inputs.goal}${tone ? `\nTone: ${tone}` : ''}\n\nFor each subject line, provide strictly these fields:\n- text\n- openRate (percent string like \'45%\')\n- trigger (e.g., Curiosity)\n- charCount (integer)\n\nReturn as a JSON array.`;
+      break;
+    case 'resume':
+      prompt = `Generate ${Math.max(1, outputCount)} powerful resume bullet points based on:\nJob Title: ${inputs.jobTitle}\nAchievements: ${inputs.achievements}\nMetrics: ${inputs.metrics || 'N/A'}${tone ? `\nTone: ${tone}` : ''}\n\nReturn a JSON array of objects with fields:\n- text (the bullet text)\n- actionVerb (the leading action verb)\n- score (ATS fit score like '92/100').`;
+      break;
+    case 'cold_email':
+      prompt = `Generate 3 personalized cold email variations for:\nProspect: ${inputs.prospectName}\nCompany: ${inputs.company}\nValue Proposition: ${inputs.valueProp || 'N/A'}\nPain Point: ${inputs.painPoint || 'N/A'}${tone ? `\nTone: ${tone}` : ''}\n\nProvide variations with hooks: Curiosity, Pain-Point, Value-First.\n\nFor each variation, return strictly these fields:\n- text\n- hook (Curiosity Hook | Pain-Point Hook | Value-First Hook)\n- tips (array of 3 short personalization tips)\n- followUps (array of 2 short follow-up templates)\n\nReturn a JSON array.`;
+      break;
+    case 'product_description':
+      prompt = `Generate 3 product descriptions for:\nProduct: ${inputs.productName}\nFeatures: ${inputs.features}\nTarget Market: ${inputs.targetMarket}\nPrice Point: ${inputs.pricePoint}${tone ? `\nTone Preference: ${tone}` : ''}\nBullet Mode: ${inputs.bulletMode ? 'ON' : 'OFF'}\n\nReturn a JSON array of objects with fields:\n- text\n- tone (Casual & Friendly | Professional | Luxury Premium)\n- seoKeywords (array of ~5 SEO keywords)\n- metaDescription (concise 140-160 chars)\n- cta (short call-to-action)\n${inputs.bulletMode ? '- bullets (array of 5 concise bullet points for e-commerce listing)\n' : ''}`;
+      break;
+    case 'job_description':
+      prompt = `Generate a complete job description for:\nRole Title: ${inputs.roleTitle}\nResponsibilities: ${inputs.responsibilities}\nCulture: ${inputs.culture || 'N/A'}\nExperience Level: ${inputs.experienceLevel}${tone ? `\nTone: ${tone}` : ''}\n\nReturn a single JSON object with strictly these fields:\n- roleSummary (string)\n- responsibilities (array of 5-8 bullet strings)\n- requiredQualifications (array of bullet strings)\n- niceToHave (array of bullet strings)\n- salaryRange (string)\n- culture (string)\n- eeoStatement (string)\n- complianceNotes (array of 3 short notes about inclusive/ADA/EEOC-friendly language)`;
+      break;
+    case 'linkedin':
+    case 'linkedin_post':
+      prompt = `Generate 3 LinkedIn post variations for:\nTopic: ${inputs.topic}\nIndustry: ${inputs.industry}\nTone: ${inputs.tone}${tone ? `\nTone Override: ${tone}` : ''}\n\nEach variation should include a strong hook, body, and CTA, and suggest hashtags.\nReturn a JSON array of objects with fields:\n- text\n- engagementScore (e.g., 'High', 'Very High', 'Medium-High')\n- hashtags (e.g., '#CareerAdvice #Tech')\n- emojiSuggestions (array of 3-6 relevant emojis).`;
+      break;
+    case 'social_ad':
+      prompt = `Generate ${Math.max(1, outputCount)} short social media ad copies for:\nProduct/Service: ${inputs.productName}\nTarget Audience: ${inputs.audience}\nPlatform: ${inputs.platform}\nCampaign Goal: ${inputs.goal}${tone ? `\nTone: ${tone}` : ''}\n\nReturn a JSON array of objects with fields:\n- text\n- platform\n- predictedCtr (percent string like '3.2%')\n- trigger (FOMO | Social Proof | Curiosity | Urgency)\n- charCount (integer)`;
+      break;
+    case 'summarizer':
+      prompt = `Condense the following text preserving key points.\nTone: ${inputs.tone}\nTarget length: ${inputs.length}\n\nText:\n${inputs.text}\n\nReturn a single JSON object with fields:\n- summary (string)\n- readability (e.g., '75/100' or 'Grade 8')\n- keyPoints (array of 3-6 short bullets)\n- keywords (array of ~5 SEO keywords)\n- readingTime (string like '35 sec')\n- timeSaved (string like '1m 25s saved')`;
+      break;
+    case 'cover_letter':
+      prompt = `Write a professional cover letter (250-300 words).\nJob Title: ${inputs.jobTitle}\nCompany: ${inputs.company}\nKey Achievement: ${inputs.achievement}\nHiring Manager: ${inputs.hiringManager || 'N/A'}${tone ? `\nTone: ${tone}` : ''}\n\nReturn a single JSON object with fields:\n- text\n- atsScore (like '92/100')\n- openingHook (string)\n- closing (string)`;
+      break;
+    case 'twitter_thread':
+      prompt = `Compose a Twitter/X thread.\nTopic: ${inputs.topic}\nAudience: ${inputs.audience}\nTone: ${inputs.tone}\nLength: ${inputs.length} tweets\n\nReturn a single JSON object with fields:\n- tweets (array of ${inputs.length || 5} strings, numbered appropriately)\n- engagementPrediction (string like 'Est. 450 likes, 120 reposts')\n- hashtags (string like '#growth #startups')`;
+      break;
+    case 'faq':
+      prompt = `Generate an FAQ section.\nProduct/Service: ${inputs.productName}\nPain Points: ${inputs.painPoints}\nFeatures: ${inputs.features}\nFAQ Count: ${inputs.count || 10}${tone ? `\nTone: ${tone}` : ''}\n\nReturn a single JSON object with fields:\n- items (array of objects with {question, answer})\n- seoScore (like '8.5/10')\n- schemaMarkup (JSON-LD string for FAQPage)`;
+      break;
+    case 'script':
+      prompt = `Write a script/voiceover.\nTopic: ${inputs.topic}\nDuration: ${inputs.duration}\nTone: ${inputs.tone}\nTarget Viewer: ${inputs.viewer}\n\nInclude pacing and clear [Action]/[Pause] markers with timestamps.\nReturn a single JSON object with fields:\n- segments (array of objects with {time, line})\n- pacingWpm (number)\n- wordCount (number)\n- readTime (string)`;
+      break;
+    case 'blog_helper':
+      prompt = `You are an expert blog and article writing assistant.\nMode: ${inputs.mode} (one of: intro, outline, conclusion, section, paragraph, paragraph_expand, sentence_expand, article_expand, article_rewrite).\nTopic: ${inputs.topic}\nTarget audience: ${inputs.audience || 'general readers'}\nKeywords: ${inputs.keywords || 'none'}\nTone: ${inputs.tone || tone || 'neutral'}\nSource text (if provided for expand/rewrite modes): ${inputs.sourceText || 'N/A'}\n\nGenerate ${outputCount} variants appropriate for the selected mode.\nReturn a JSON array of objects with the following field:\n- text (the generated content as a string)`;
+      break;
+    case 'copy_helper':
+      prompt = `You are an expert direct-response copywriter.\nMode: ${inputs.mode} (one of: aida, pas, pbs, sales_blurb, tagline).\nProduct or offer: ${inputs.product}\nAudience: ${inputs.audience || 'general audience'}\nOffer or main benefit: ${inputs.offer || 'N/A'}\nPain points to address: ${inputs.painPoints || 'N/A'}\nTone: ${inputs.tone || tone || 'neutral'}\n\nGenerate ${Math.max(1, outputCount)} short copy variations tailored to this mode.\nReturn a JSON array of objects with:\n- text (the copy as a single string)`;
+      break;
+    case 'social_helper':
+      prompt = `You are a social media copywriter.\nMode: ${inputs.mode} (one of: post, caption, hook, hashtag_block, bio).\nPlatform: ${inputs.platform}\nTopic: ${inputs.topic}\nAudience: ${inputs.audience || 'general followers'}\nCTA or goal: ${inputs.cta || 'N/A'}\nTone: ${inputs.tone || tone || 'neutral'}\n\nGenerate ${Math.max(1, outputCount)} variations suitable for this platform and mode.\n\nFormatting rules (important):\n- Use plain text only.\n- Do not use markdown syntax (no *, **, bullet markers, or code fences).\n- Do not use emojis or emoji characters.\n- You may use normal sentences and line breaks.\n\nReturn a JSON array of objects with:\n- text (the post, caption, hook, hashtag block, or bio as a single string)`;
+      break;
+    case 'email_writer':
+      prompt = `You are a helpful professional email writer.\nEmail type: ${inputs.emailType} (one of: follow_up, outreach, newsletter, professional, thank_you).\nRecipient: ${inputs.recipient || 'N/A'}\nSubject or topic: ${inputs.subject || inputs.topic || 'N/A'}\nContext / key details: ${inputs.context || 'N/A'}\nTone: ${inputs.tone || tone || 'professional'}\n\nWrite ${Math.max(1, outputCount)} concise email drafts (body only; you may include a clear subject line at the top if helpful).\nReturn a JSON array of objects with:\n- text (the full email content as a single string)`;
+      break;
+    case 'rewrite_helper':
+      prompt = `You are an expert editor and rewriting assistant.\nMode: ${inputs.mode} (one of: rewrite, improve, simplify, formal, casual, shorten, expand, tone_change).\nTone: ${inputs.tone || tone || 'neutral'}\nTarget length: ${inputs.length || 'same'}\nExtra instructions: ${inputs.instructions || 'N/A'}\n\nOriginal text:\n${inputs.sourceText}\n\nRewrite the text according to the mode and instructions, generating ${Math.max(1, outputCount)} distinct variations.\nReturn a JSON array of objects with:\n- text (the rewritten text as a single string)`;
+      break;
+    case 'blog_post': {
+      const isLong = inputs.length === 'long';
+      const role = isLong
+        ? 'You are an expert long-form blog writer. You write comprehensive, deep-dive articles.'
+        : 'You are a professional blog writer.';
+      const taskInstruction = isLong
+        ? 'Write a complete, extensive blog article. Add detailed explanations, multiple examples, case studies, and practical applications in every section. The total word count must comfortably exceed 3000 words.'
+        : 'Write a standard blog post. Aim for around 1500 words with clear headings.';
+      prompt = `${role}\nTopic: ${inputs.topic}\nTarget audience: ${inputs.audience || 'general readers'}\nGoal: ${inputs.goal || 'educate and engage'}\nPrimary keyword: ${inputs.primaryKeyword || 'N/A'}\nSecondary keywords: ${inputs.secondaryKeywords || 'N/A'}\nOutline mode: ${inputs.outlineMode || 'auto'} (auto | custom)\nCustom outline (if any):\n${inputs.customOutline || 'N/A'}\nTarget length: ${inputs.length}\nTone: ${inputs.tone || tone || 'neutral'}\n\n${taskInstruction}\n\nFormatting rules (important):\n- Use plain text only.\n- Do not use markdown syntax (no *, **, bullet markers, or code fences).\n- Do not include markdown headings like #, ##, or code fences.\n- You may still use numbered lists like '1.' or '2.' when helpful.\n- ESCAPE ALL QUOTES and NEWLINES inside JSON strings. Return VALID JSON.\n\nReturn a single JSON object with fields:\n- title\n- slug_suggestion\n- outline (array of heading strings)\n- body (full text as a single string)\n- meta_description`;
+      break;
+    }
+    case 'article_from_outline': {
+      const isArtLong = inputs.length === 'long';
+      const artRole = isArtLong
+        ? 'You are an expert long-form article writer. Expand the outline into a comprehensive deep-dive.'
+        : 'You are an expert article writer.';
+      const articleTaskInstruction = isArtLong
+        ? 'Expand each outline point into multiple rich paragraphs with examples, data, and detailed explanations. The total word count must comfortably exceed 3000 words.'
+        : 'Write a balanced article. The total word count should be around 1500 words.';
+      prompt = `${artRole} Expand the provided outline.\nTitle or topic: ${inputs.topic}\nOutline:\n${inputs.outline}\nTarget audience: ${inputs.audience || 'general readers'}\nTarget length: ${inputs.length}\nTone: ${inputs.tone || tone || 'neutral'}\n\n${articleTaskInstruction}\n\nFormatting rules (important):\n- Use plain text only.\n- Do not use markdown syntax (no *, **, bullet markers, or code fences).\n- Do not include markdown headings like #, ##, or code fences.\n- You may still use numbered lists like '1.' or '2.' when helpful.\n- ESCAPE ALL QUOTES and NEWLINES inside JSON strings. Return VALID JSON.\n\nReturn a single JSON object with fields:\n- title\n- outline (normalized array of headings)\n- body (full text as a single string)\n- meta_description`;
+      break;
+    }
+    case 'seo_blog_optimizer': {
+      prompt = `You are an SEO expert and editor. Improve the following blog article for SEO and readability.\nPrimary keyword: ${inputs.primaryKeyword}\nSecondary keywords: ${inputs.secondaryKeywords || 'N/A'}\nGoal: ${inputs.goal || 'improve organic traffic and CTR'}\nTone: ${inputs.tone || tone || 'neutral'}\n\nOriginal article:\n${inputs.originalText}\n\nFormatting rules (important):\n- Use plain text only.\n- Do not use markdown syntax (no *, **, bullet markers, or code fences).\n- Do not include markdown headings like #, ##, or code fences.\n- You may still use numbered lists like '1.' or '2.' when helpful.\n\nReturn a single JSON object with fields:\n- optimized_title\n- optimized_meta_description\n- optimized_body\n- suggested_headings (array of strings)\n- keyword_usage_notes (array of short bullet strings)\n- improvements_summary (short paragraph)`;
+      break;
+    }
+    case 'case_study_writer': {
+      prompt = `You are a B2B case study writer. Create a compelling success story.\nClient name: ${inputs.clientName || 'N/A'}\nIndustry: ${inputs.industry || 'N/A'}\nProblem / challenge: ${inputs.problem}\nSolution summary: ${inputs.solution}\nKey results and metrics: ${inputs.results}\nTone: ${inputs.tone || tone || 'professional'}\n\nWrite a detailed narrative case study with clear section transitions.\n\nFormatting rules (important):\n- Use plain text only.\n- Do not use markdown syntax (no *, **, bullet markers, or code fences).\n- Do not include markdown headings like #, ##, or code fences.\n- You may still use numbered lists like '1.' or '2.' when listing results.\n\nReturn a single JSON object with fields:\n- headline\n- summary\n- background\n- challenge\n- solution\n- results\n- quote`;
+      break;
+    }
+    case 'landing_page_writer': {
+      prompt = `You are a conversion-focused landing page copywriter.\nProduct or offer: ${inputs.product}\nTarget audience: ${inputs.audience}\nMain benefit / promise: ${inputs.benefit}\nKey features: ${inputs.features}\nOffer and pricing: ${inputs.offer || 'N/A'}\nTone: ${inputs.tone || tone || 'persuasive'}\n\nWrite a full landing page including hero, social proof, benefits, and a closing section.\n\nFormatting rules (important):\n- Use plain text only.\n- Do not use markdown syntax (no *, **, bullet markers, or code fences).\n- Do not include markdown headings like #, ##, or code fences.\n- You may still use numbered lists like '1.' or '2.' when helpful.\n\nReturn a single JSON object with fields:\n- hero_headline\n- hero_subheadline\n- hero_cta\n- sections (array of { title, body })\n- faq_items (array of { question, answer })`;
+      break;
+    }
+    case 'report_writer': {
+      prompt = `You are a professional report/whitepaper writer. Draft a structured long-form report.\nTopic: ${inputs.topic}\nTarget audience: ${inputs.audience || 'executives'}\nKey points or thesis: ${inputs.keyPoints}\nDesired sections: ${inputs.sections || 'auto'}\nTone: ${inputs.tone || tone || 'formal'}\nTarget length: ${inputs.length || 'long'} (short ~1500 words, medium ~2500 words, long ~3000+ words; for long, write at least 2800 words)\n\nWrite a detailed report with multiple well-developed sections.\n\nFormatting rules (important):\n- Use plain text only.\n- Do not use markdown syntax (no *, **, bullet markers, or code fences).\n- Do not include markdown headings like #, ##, or code fences.\n- You may still use numbered lists like '1.' or '2.' when helpful.\n\nReturn a single JSON object with fields:\n- title\n- abstract\n- sections (array of { heading, body })`;
+      break;
+    }
+    default:
+      // Generic fallback for unmapped tools or custom tools
+      prompt = `Act as a ${tool} generator.
+      Inputs: ${JSON.stringify(inputs)}
+      
+      Instructions:
+      - Generate content based on the inputs.
+      - Return the result as a valid JSON object.
+      - If the input includes long text (e.g. from a previous step), assume the goal is to process/rewrite it for this tool's format.`;
+      break;
+  }
+
+  // Add brand context if provided
+  const brandSuffix = meta.brandContext ? `\n\n${meta.brandContext}` : '';
+  let currentPrompt = prompt + brandSuffix + "\n\nIMPORTANT: Return strictly valid JSON. Do not use Markdown code blocks. Escape all quotes and newlines inside strings.";
+  let retries = 0;
+  const maxRetries = 2;
+  let lastError: any = null;
+  let lastText = "";
+
+  while (retries <= maxRetries) {
+      try {
+          const text = await callOpenRouter(currentPrompt, 0.9);
+          lastText = text;
+          
+          const parsed = parseJSONSafe(text);
+          return formatResults(tool, parsed);
+      } catch (e: any) {
+          console.warn(`[Workflow] JSON Parse failed (attempt ${retries + 1})`, e.message);
+          lastError = e;
+          retries++;
+          
+          if (retries <= maxRetries) {
+              currentPrompt = `${prompt}\n\nPREVIOUS OUTPUT CAUSED ERROR:\n${lastError.message}\n\nEnsure you create VALID JSON. Escape all quotes inside strings (e.g. \\") and all newlines (e.g. \\n). Do not leave trailing commas.`;
+          }
+      }
+  }
+
+  return { raw_text: lastText, error: "Model returned non-JSON after retries: " + lastError?.message };
+}
+
+function stripBasicMarkdown(text: string) {
+  if (!text) return '';
+  return text
+    // Remove markdown headers
+    .replace(/^#{1,6}\s+/gm, '')
+    // Remove bullet points and list markers
+    .replace(/^[\s]*[-*+]\s+/gm, '')
+    .replace(/^\d+\.\s+/gm, '')
+    // Remove bold (**text** or __text__)
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/__(.+?)__/g, '$1')
+    // Remove italics (*text* or _text_) - must come after bold
+    .replace(/\*([^*\n]+?)\*/g, '$1')
+    .replace(/(?<!\w)_([^_\n]+?)_(?!\w)/g, '$1')
+    // Remove inline code
+    .replace(/`{1,3}([^`]+)`{1,3}/g, '$1')
+    // Remove horizontal rules
+    .replace(/^[-*_]{3,}$/gm, '')
+    // Clean up extra whitespace
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function formatResults(tool: string, data: any) {
+  switch (tool) {
+    case 'email_subject': {
+      const arr = Array.isArray(data) ? data : [];
+      return arr.map((item) => ({
+        text: String(item?.text ?? ''),
+        openRate: String(item?.openRate ?? ''),
+        trigger: String(item?.trigger ?? ''),
+        charCount: Number(item?.charCount ?? 0),
+      }));
+    }
+    case 'resume': {
+      const arr = Array.isArray(data) ? data : [];
+      return arr.map((item) => ({
+        text: String(item?.text ?? ''),
+        actionVerb: String(item?.actionVerb ?? ''),
+        score: String(item?.score ?? ''),
+      }));
+    }
+    case 'cold_email': {
+      const arr = Array.isArray(data) ? data : [];
+      return arr.map((item) => ({
+        text: String(item?.text ?? ''),
+        hook: String(item?.hook ?? ''),
+        tips: Array.isArray(item?.tips) ? item.tips.map((t: any) => String(t)) : [],
+        followUps: Array.isArray(item?.followUps) ? item.followUps.map((t: any) => String(t)) : [],
+      }));
+    }
+    case 'product_description': {
+      const arr = Array.isArray(data) ? data : [];
+      return arr.map((item) => ({
+        text: String(item?.text ?? ''),
+        tone: String(item?.tone ?? ''),
+        seoKeywords: Array.isArray(item?.seoKeywords) ? item.seoKeywords.map((t: any) => String(t)) : [],
+        metaDescription: String(item?.metaDescription ?? ''),
+        cta: String(item?.cta ?? ''),
+        bullets: Array.isArray(item?.bullets) ? item.bullets.map((t: any) => String(t)) : [],
+      }));
+    }
+    case 'job_description': {
+      if (data && typeof data === 'object') {
+        return {
+          roleSummary: String(data?.roleSummary ?? ''),
+          responsibilities: Array.isArray(data?.responsibilities) ? data.responsibilities.map((t: any) => String(t)) : [],
+          requiredQualifications: Array.isArray(data?.requiredQualifications) ? data.requiredQualifications.map((t: any) => String(t)) : [],
+          niceToHave: Array.isArray(data?.niceToHave) ? data.niceToHave.map((t: any) => String(t)) : [],
+          salaryRange: String(data?.salaryRange ?? ''),
+          culture: String(data?.culture ?? ''),
+          eeoStatement: String(data?.eeoStatement ?? ''),
+          complianceNotes: Array.isArray(data?.complianceNotes) ? data.complianceNotes.map((t: any) => String(t)) : [],
+        };
+      }
+      return data;
+    }
+    case 'linkedin': 
+    case 'linkedin_post': {
+      const arr = Array.isArray(data) ? data : [];
+      return arr.map((item) => ({
+        text: stripBasicMarkdown(String(item?.text ?? '')),
+        engagementScore: String(item?.engagementScore ?? ''),
+        hashtags: String(item?.hashtags ?? ''),
+        emojiSuggestions: Array.isArray(item?.emojiSuggestions) ? item.emojiSuggestions.map((t: any) => String(t)) : [],
+      }));
+    }
+    case 'social_ad': {
+      const arr = Array.isArray(data) ? data : [];
+      return arr.map((item) => ({
+        text: String(item?.text ?? ''),
+        platform: String(item?.platform ?? ''),
+        predictedCtr: String(item?.predictedCtr ?? ''),
+        trigger: String(item?.trigger ?? ''),
+        charCount: Number(item?.charCount ?? 0),
+      }));
+    }
+    case 'summarizer': {
+      if (data && typeof data === 'object') {
+        return {
+          summary: String(data?.summary ?? ''),
+          readability: String(data?.readability ?? ''),
+          keyPoints: Array.isArray(data?.keyPoints) ? data.keyPoints.map((t: any) => String(t)) : [],
+          keywords: Array.isArray(data?.keywords) ? data.keywords.map((t: any) => String(t)) : [],
+          readingTime: String(data?.readingTime ?? ''),
+          timeSaved: String(data?.timeSaved ?? ''),
+        };
+      }
+      return data;
+    }
+    case 'cover_letter': {
+      if (data && typeof data === 'object') {
+        return {
+          text: String(data?.text ?? ''),
+          atsScore: String(data?.atsScore ?? ''),
+          openingHook: String(data?.openingHook ?? ''),
+          closing: String(data?.closing ?? ''),
+        };
+      }
+      return data;
+    }
+    case 'twitter_thread': {
+      if (data && typeof data === 'object') {
+        return {
+          tweets: Array.isArray(data?.tweets) ? data.tweets.map((t: any) => String(t)) : [],
+          engagementPrediction: String(data?.engagementPrediction ?? ''),
+          hashtags: String(data?.hashtags ?? ''),
+        };
+      }
+      return data;
+    }
+    case 'faq': {
+      if (data && typeof data === 'object') {
+        return {
+          items: Array.isArray(data?.items)
+            ? data.items.map((it: any) => ({
+                question: String(it?.question ?? ''),
+                answer: String(it?.answer ?? ''),
+              }))
+            : [],
+          seoScore: String(data?.seoScore ?? ''),
+          schemaMarkup: String(data?.schemaMarkup ?? ''),
+        };
+      }
+      return data;
+    }
+    case 'script': {
+      if (data && typeof data === 'object') {
+        return {
+          segments: Array.isArray(data?.segments)
+            ? data.segments.map((s: any) => ({
+                time: String(s?.time ?? ''),
+                line: String(s?.line ?? ''),
+              }))
+            : [],
+          pacingWpm: Number(data?.pacingWpm ?? 0),
+          wordCount: Number(data?.wordCount ?? 0),
+          readTime: String(data?.readTime ?? ''),
+        };
+      }
+      return data;
+    }
+    case 'blog_post': {
+      const item = Array.isArray(data) ? data[0] : data;
+      if (item && typeof item === 'object') {
+        return {
+          title: stripBasicMarkdown(String(item?.title ?? '')),
+          slug_suggestion: stripBasicMarkdown(String(item?.slug_suggestion ?? '')),
+          outline: Array.isArray(item?.outline)
+            ? item.outline.map((t: any) => stripBasicMarkdown(String(t ?? '')))
+            : [],
+          body: stripBasicMarkdown(String(item?.body ?? '')),
+          meta_description: stripBasicMarkdown(String(item?.meta_description ?? '')),
+        };
+      }
+      return data;
+    }
+    case 'article_from_outline': {
+      const item = Array.isArray(data) ? data[0] : data;
+      if (item && typeof item === 'object') {
+        return {
+          title: stripBasicMarkdown(String(item?.title ?? '')),
+          outline: Array.isArray(item?.outline)
+            ? item.outline.map((t: any) => stripBasicMarkdown(String(t ?? '')))
+            : [],
+          body: stripBasicMarkdown(String(item?.body ?? '')),
+        };
+      }
+      return data;
+    }
+    case 'seo_blog_optimizer': {
+      const item = Array.isArray(data) ? data[0] : data;
+      if (item && typeof item === 'object') {
+        return {
+          optimized_title: stripBasicMarkdown(String(item?.optimized_title ?? '')),
+          optimized_meta_description: stripBasicMarkdown(String(item?.optimized_meta_description ?? '')),
+          optimized_body: stripBasicMarkdown(String(item?.optimized_body ?? '')),
+          suggested_headings: Array.isArray(item?.suggested_headings)
+            ? item.suggested_headings.map((t: any) => stripBasicMarkdown(String(t ?? '')))
+            : [],
+          keyword_usage_notes: Array.isArray(item?.keyword_usage_notes)
+            ? item.keyword_usage_notes.map((t: any) => stripBasicMarkdown(String(t ?? '')))
+            : [],
+          improvements_summary: stripBasicMarkdown(String(item?.improvements_summary ?? '')),
+        };
+      }
+      return data;
+    }
+    case 'case_study_writer': {
+      const item = Array.isArray(data) ? data[0] : data;
+      if (item && typeof item === 'object') {
+        return {
+          headline: stripBasicMarkdown(String(item?.headline ?? '')),
+          summary: stripBasicMarkdown(String(item?.summary ?? '')),
+          background: stripBasicMarkdown(String(item?.background ?? '')),
+          challenge: stripBasicMarkdown(String(item?.challenge ?? '')),
+          solution: stripBasicMarkdown(String(item?.solution ?? '')),
+          results: stripBasicMarkdown(String(item?.results ?? '')),
+          quote: stripBasicMarkdown(String(item?.quote ?? '')),
+        };
+      }
+      return data;
+    }
+    case 'landing_page_writer': {
+      const item = Array.isArray(data) ? data[0] : data;
+      if (item && typeof item === 'object') {
+        return {
+          hero_headline: stripBasicMarkdown(String(item?.hero_headline ?? '')),
+          hero_subheadline: stripBasicMarkdown(String(item?.hero_subheadline ?? '')),
+          hero_cta: stripBasicMarkdown(String(item?.hero_cta ?? '')),
+          sections: Array.isArray(item?.sections)
+            ? item.sections.map((s: any) => ({
+                title: stripBasicMarkdown(String(s?.title ?? '')),
+                body: stripBasicMarkdown(String(s?.body ?? '')),
+              }))
+            : [],
+          faq_items: Array.isArray(item?.faq_items)
+            ? item.faq_items.map((f: any) => ({
+                question: stripBasicMarkdown(String(f?.question ?? '')),
+                answer: stripBasicMarkdown(String(f?.answer ?? '')),
+              }))
+            : [],
+        };
+      }
+      return data;
+    }
+    case 'report_writer': {
+      const item = Array.isArray(data) ? data[0] : data;
+      if (item && typeof item === 'object') {
+        return {
+          title: stripBasicMarkdown(String(item?.title ?? '')),
+          abstract: stripBasicMarkdown(String(item?.abstract ?? '')),
+          sections: Array.isArray(item?.sections)
+            ? item.sections.map((s: any) => ({
+                heading: stripBasicMarkdown(String(s?.heading ?? '')),
+                body: stripBasicMarkdown(String(s?.body ?? '')),
+              }))
+            : [],
+        };
+      }
+      return data;
+    }
+    // For helpers (blog_helper, etc.), the default response is already mostly fine or complex to normalize perfectly here without bloating. 
+    // I'll add a simple pass-through or basic string normalization if needed, but for now they return { text } mostly.
+    case 'blog_helper':
+    case 'copy_helper':
+    case 'social_helper':
+    case 'email_writer':
+    case 'rewrite_helper':
+        // Helpers usually return array of objects with text. 
+        // Let's just ensure they are arrays.
+        return Array.isArray(data) ? data : [data];
+    default:
+      return data;
+  }
+}

@@ -1,6 +1,80 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
+
+// OpenRouter Client (compatible with Google Generative AI interface)
+const OPENROUTER_BASE = 'https://openrouter.ai/api/v1';
+
+class OpenRouterModel {
+  private apiKey: string;
+  private modelId: string;
+
+  constructor(apiKey: string, modelId: string) {
+    this.apiKey = apiKey;
+    this.modelId = modelId;
+  }
+
+  async generateContent(request: string | { contents?: any[]; generationConfig?: any }) {
+    let messages: { role: string; content: string }[] = [];
+
+    if (typeof request === 'string') {
+      messages.push({ role: 'user', content: request });
+    } else if (request.contents) {
+      messages = request.contents.map((c: any) => ({
+        role: c.role === 'model' ? 'assistant' : c.role,
+        content: c.parts.map((p: any) => p.text).join(''),
+      }));
+    }
+
+    const config = typeof request === 'object' ? request.generationConfig || {} : {};
+
+    const response = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        'HTTP-Referer': 'https://writerai.app',
+        'X-Title': 'WriterAI',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: this.modelId,
+        messages: messages,
+        max_tokens: config.maxOutputTokens || 16384,
+        temperature: config.temperature || 0.7,
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`OpenRouter API Error (${response.status}): ${errText}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.choices || data.choices.length === 0) {
+      throw new Error('No content generated');
+    }
+
+    const content = data.choices[0].message.content;
+    const finishReason = data.choices[0].finish_reason;
+    
+    console.log('[OpenRouter] Response received, finish_reason:', finishReason, 'content length:', content?.length);
+    
+    // Warn if response was truncated
+    if (finishReason === 'length') {
+      console.warn('[OpenRouter] Response was truncated due to max_tokens limit');
+    }
+
+    return {
+      response: {
+        text: () => content,
+      },
+    };
+  }
+}
+
+function getOpenRouterModel(apiKey: string, modelId: string) {
+  return new OpenRouterModel(apiKey, modelId);
+}
 
 const ToolSchema = z.object({
   tool: z.enum([
@@ -32,6 +106,7 @@ const ToolSchema = z.object({
   inputs: z.record(z.any()),
   outputCount: z.number().min(1).max(10).optional(),
   tone: z.string().optional(),
+  brandVoiceId: z.string().optional(),
 });
 
 let supabaseAdminClient: SupabaseClient | null = null;
@@ -64,6 +139,15 @@ function getUserIdFromHeader(req: any): string | null {
     return id;
   } catch (e: any) {
     console.error('[API][generate] getUserIdFromHeader error', e);
+    return null;
+  }
+}
+
+function getOrgIdFromHeader(req: any): string | null {
+  try {
+    const v = (req.headers?.['x-organization-id'] || req.headers?.['X-Organization-Id']) as string | undefined;
+    return (v && String(v)) || null;
+  } catch (e: any) {
     return null;
   }
 }
@@ -449,33 +533,65 @@ function buildPrompt(tool: string, inputs: any, outputCount: number, tone?: stri
         Math.max(1, outputCount)
       } distinct variations.\nReturn a JSON array of objects with:\n- text (the rewritten text as a single string)`;
     case 'blog_post':
-      const isLong = inputs.length === 'long';
-      // We treat 'short' as 'medium' now since short is removed from UI
+      // Support custom word count from inputs
+      const targetWordCount = inputs.wordCount || (inputs.length === 'long' ? 3500 : inputs.length === 'short' ? 1000 : 2000);
+      const isLong = targetWordCount >= 3000;
+      const minWords = Math.floor(targetWordCount * 0.9);
+      const maxWords = Math.floor(targetWordCount * 1.1);
+      
       const role = isLong
         ? 'You are an expert long-form blog writer. You write comprehensive, deep-dive articles.'
-        : 'You are a professional blog writer.';
+        : 'You are a professional blog writer who writes detailed, engaging content.';
 
-      const taskInstruction = isLong
-        ? 'Write a complete, extensive blog article. Add detailed explanations, multiple examples, case studies, and practical applications in every section. The total word count must comfortably exceed 3000 words.'
-        : 'Write a standard blog post. Aim for around 1500 words with clear headings.';
+      return `${role}
 
-      return `${role}\nTopic: ${
-        inputs.topic
-      }\nTarget audience: ${
-        inputs.audience || 'general readers'
-      }\nGoal: ${
-        inputs.goal || 'educate and engage'
-      }\nPrimary keyword: ${
-        inputs.primaryKeyword || 'N/A'
-      }\nSecondary keywords: ${
-        inputs.secondaryKeywords || 'N/A'
-      }\nOutline mode: ${
-        inputs.outlineMode || 'auto'
-      } (auto | custom)\nCustom outline (if any):\n${
-        inputs.customOutline || 'N/A'
-      }\nTarget length: ${inputs.length}\nTone: ${
-        inputs.tone || tone || 'neutral'
-      }\n\n${taskInstruction}\n\nFormatting rules (important):\n- Use plain text only.\n- Do not use markdown syntax (no *, **, bullet markers, or code fences).\n- Do not include markdown headings like #, ##, or code fences.\n- You may still use numbered lists like '1.' or '2.' when helpful.\n\nReturn a single JSON object with fields:\n- title\n- slug_suggestion\n- outline (array of heading strings)\n- body (full text as a single string)\n- meta_description`;
+TOPIC: ${inputs.topic}
+TARGET AUDIENCE: ${inputs.audience || 'general readers'}
+GOAL: ${inputs.goal || 'educate and engage'}
+PRIMARY KEYWORD: ${inputs.primaryKeyword || 'N/A'}
+SECONDARY KEYWORDS: ${inputs.secondaryKeywords || 'N/A'}
+TONE: ${inputs.tone || 'professional'}
+
+=== SUBSTANCE & DEPTH REQUIREMENT ===
+- The article MUST be comprehensive and provide value.
+- Do NOT repeat yourself to reach word count.
+- Instead, go deeper into sub-topics, provide examples, and actionable advice.
+
+=== STRICT WORD COUNT REQUIREMENT ===
+Your article MUST be between ${minWords} and ${maxWords} words.
+Target: ${targetWordCount} words. 
+This is NON-NEGOTIABLE. Count your words before responding.
+
+=== OUTPUT FORMAT (JSON) ===
+Return ONLY a valid JSON object with exactly these 5 fields:
+
+{
+  "title": "Compelling Article Title Here",
+  "slug_suggestion": "url-friendly-slug-here",
+  "outline": ["Introduction", "Section 1", "Section 2", "...""],
+  "body": "FULL ARTICLE TEXT GOES HERE - plain text with headings, NO JSON inside",
+  "meta_description": "SEO meta description 150-160 characters"
+}
+
+=== CRITICAL RULES FOR THE BODY FIELD ===
+1. The body field must contain ONLY the article text.
+2. DO NOT put JSON syntax inside the body (no quotes, braces, colons, "title":, etc.)
+3. Start the body with the Introduction paragraph directly.
+4. Use plain text headings like "Introduction" or "What is AI?" on their own lines.
+5. Write complete paragraphs, not JSON key-value pairs.
+6. NO HTML tags in the body (<h1>, <p>, etc.) - ONLY plain text with spacing.
+7. NO markdown (no #, ##, *, **) - use simple spacing for hierarchy.
+
+EXAMPLE of CORRECT body format:
+"body": "Introduction
+
+Artificial intelligence is transforming how we work and live. In this article, we explore the fundamentals of AI and its impact on society.
+
+What is Artificial Intelligence?
+
+Artificial intelligence refers to computer systems designed to perform tasks that typically require human intelligence..."
+
+Write the full article now. Remember: ${minWords}-${maxWords} words.`;
     case 'article_from_outline':
       const isArtLong = inputs.length === 'long';
 
@@ -558,10 +674,102 @@ function buildPrompt(tool: string, inputs: any, outputCount: number, tone?: stri
 function stripBasicMarkdown(text: string): string {
   if (!text) return '';
   return text
-    .replace(/^\s*[-*]\s+/gm, '')
+    // Remove markdown headers
+    .replace(/^#{1,6}\s+/gm, '')
+    // Remove bullet points and list markers
+    .replace(/^[\s]*[-*+]\s+/gm, '')
+    .replace(/^\d+\.\s+/gm, '')
+    // Remove bold (**text** or __text__)
     .replace(/\*\*(.+?)\*\*/g, '$1')
     .replace(/__(.+?)__/g, '$1')
-    .replace(/`{1,3}([^`]+)`{1,3}/g, '$1');
+    // Remove italics (*text* or _text_) - must come after bold
+    .replace(/\*([^*\n]+?)\*/g, '$1')
+    .replace(/(?<!\w)_([^_\n]+?)_(?!\w)/g, '$1')
+    // Remove inline code
+    .replace(/`{1,3}([^`]+)`{1,3}/g, '$1')
+    // Remove horizontal rules
+    .replace(/^[-*_]{3,}$/gm, '')
+    // Clean up extra whitespace
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// Clean JSON artifacts from blog body - AGGRESSIVELY
+function cleanBlogBody(body: string): string {
+  if (!body) return '';
+  
+  // 1. If it's a stringified JSON array, join it
+  let input = body.trim();
+  if (input.startsWith('[') && input.endsWith(']')) {
+    try {
+      const parsed = JSON.parse(input);
+      if (Array.isArray(parsed)) {
+        input = parsed.join('\n\n');
+      }
+    } catch (e) {
+      // Proceed with original string if parse fails
+    }
+  }
+
+  // 2. Unescape common HTML entities before cleaning
+  let cleaned = input
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+
+  cleaned = cleaned
+    // Remove entire meta_description line at end
+    .replace(/["']?meta_description["']?\s*:\s*["'][^"']*["']\s*[\}\]]*\s*$/gi, '')
+    // Remove JSON ending patterns
+    .replace(/}\s*$/g, '')
+    .replace(/"\s*$/g, '')
+    .replace(/,\s*$/g, '')
+    // Remove JSON-like patterns that shouldn't be in body
+    .replace(/^["']?json["']?\s*/i, '')
+    .replace(/^\{\s*"title":/m, '')
+    .replace(/^"body":\s*"/m, '')
+    .replace(/"body":\s*"/g, '')
+    // Remove trailing field names
+    .replace(/",?\s*"(slug_suggestion|meta_description|outline|title)":\s*.*/g, '')
+    .replace(/^"(slug_suggestion|meta_description|outline|title)":\s*.*/gm, '')
+    // Remove JSON structural characters on their own lines
+    .replace(/^[\s]*[\{\}\[\]]+[\s]*$/gm, '')
+    .replace(/^\s*"\s*,?\s*$/gm, '')
+    // Remove HTML tags - VERY AGGRESSIVE
+    .replace(/<[^>]+>/g, '')
+    // Remove residual JSON-like quotes and commas at line ends
+    .replace(/^[\s]*"([^"]+)",?[\s]*$/gm, '$1') 
+    .replace(/^[\s]*"([^"]+)"[\s]*$/gm, '$1')
+    // Remove leading/trailing array brackets if they escaped previous checks
+    .replace(/^[\s]*\[\s*/m, '')
+    .replace(/\s*\][\s]*$/m, '')
+    // Clean escaped quotes and newlines from raw JSON
+    .replace(/\\"/g, '"')
+    .replace(/\\n/g, '\n')
+    // Final pass for residual structural chars
+    .replace(/[{}|[\]]/g, '')
+    // Clean up multiple newlines and whitespace
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  // Final cleanup - remove any trailing JSON-like content after last paragraph
+  const lines = cleaned.split('\n');
+  const cleanedLines = lines.filter((line: string) => {
+    const trimmed = line.trim();
+    // Skip lines that look like JSON fragments
+    if (trimmed.match(/^["']?(meta_description|slug_suggestion|outline|title)["']?\s*:/)) return false;
+    if (trimmed === '{' || trimmed === '}' || trimmed === '[' || trimmed === ']') return false;
+    if (trimmed === '"' || trimmed === '",') return false;
+    return true;
+  });
+  
+  // Remove leading and trailing quotes if they wrapped the whole result
+  let finalResult = cleanedLines.join('\n').trim();
+  if (finalResult.startsWith('"')) finalResult = finalResult.slice(1);
+  if (finalResult.endsWith('"')) finalResult = finalResult.slice(0, -1);
+  
+  return finalResult.trim();
 }
 
 function formatResults(tool: string, data: any) {
@@ -569,7 +777,7 @@ function formatResults(tool: string, data: any) {
     case 'email_subject': {
       const arr = Array.isArray(data) ? data : [];
       return arr.map((item) => ({
-        text: String(item?.text ?? ''),
+        text: stripBasicMarkdown(String(item?.text ?? '')),
         openRate: String(item?.openRate ?? ''),
         trigger: String(item?.trigger ?? ''),
         charCount: Number(item?.charCount ?? 0),
@@ -578,7 +786,7 @@ function formatResults(tool: string, data: any) {
     case 'resume': {
       const arr = Array.isArray(data) ? data : [];
       return arr.map((item) => ({
-        text: String(item?.text ?? ''),
+        text: stripBasicMarkdown(String(item?.text ?? '')),
         actionVerb: String(item?.actionVerb ?? ''),
         score: String(item?.score ?? ''),
       }));
@@ -586,50 +794,50 @@ function formatResults(tool: string, data: any) {
     case 'cold_email': {
       const arr = Array.isArray(data) ? data : [];
       return arr.map((item) => ({
-        text: String(item?.text ?? ''),
-        hook: String(item?.hook ?? ''),
-        tips: Array.isArray(item?.tips) ? item.tips.map((t: any) => String(t)) : [],
+        text: stripBasicMarkdown(String(item?.text ?? '')),
+        hook: stripBasicMarkdown(String(item?.hook ?? '')),
+        tips: Array.isArray(item?.tips) ? item.tips.map((t: any) => stripBasicMarkdown(String(t))) : [],
         followUps: Array.isArray(item?.followUps)
-          ? item.followUps.map((t: any) => String(t))
+          ? item.followUps.map((t: any) => stripBasicMarkdown(String(t)))
           : [],
       }));
     }
     case 'product_description': {
       const arr = Array.isArray(data) ? data : [];
       return arr.map((item) => ({
-        text: String(item?.text ?? ''),
+        text: stripBasicMarkdown(String(item?.text ?? '')),
         tone: String(item?.tone ?? ''),
         seoKeywords: Array.isArray(item?.seoKeywords)
           ? item.seoKeywords.map((t: any) => String(t))
           : [],
-        metaDescription: String(item?.metaDescription ?? ''),
-        cta: String(item?.cta ?? ''),
-        bullets: Array.isArray(item?.bullets) ? item.bullets.map((t: any) => String(t)) : [],
+        metaDescription: stripBasicMarkdown(String(item?.metaDescription ?? '')),
+        cta: stripBasicMarkdown(String(item?.cta ?? '')),
+        bullets: Array.isArray(item?.bullets) ? item.bullets.map((t: any) => stripBasicMarkdown(String(t))) : [],
       }));
     }
     case 'job_description': {
       if (data && typeof data === 'object') {
         return {
-          roleSummary: String(data?.roleSummary ?? ''),
+          roleSummary: stripBasicMarkdown(String(data?.roleSummary ?? '')),
           responsibilities: Array.isArray(data?.responsibilities)
-            ? data.responsibilities.map((t: any) => String(t))
+            ? data.responsibilities.map((t: any) => stripBasicMarkdown(String(t)))
             : [],
           requiredQualifications: Array.isArray(data?.requiredQualifications)
-            ? data.requiredQualifications.map((t: any) => String(t))
+            ? data.requiredQualifications.map((t: any) => stripBasicMarkdown(String(t)))
             : [],
           niceToHave: Array.isArray(data?.niceToHave)
-            ? data.niceToHave.map((t: any) => String(t))
+            ? data.niceToHave.map((t: any) => stripBasicMarkdown(String(t)))
             : [],
           salaryRange: String(data?.salaryRange ?? ''),
-          culture: String(data?.culture ?? ''),
-          eeoStatement: String(data?.eeoStatement ?? ''),
+          culture: stripBasicMarkdown(String(data?.culture ?? '')),
+          eeoStatement: stripBasicMarkdown(String(data?.eeoStatement ?? '')),
           complianceNotes: Array.isArray(data?.complianceNotes)
-            ? data.complianceNotes.map((t: any) => String(t))
+            ? data.complianceNotes.map((t: any) => stripBasicMarkdown(String(t)))
             : [],
         };
       }
       return {
-        roleSummary: String(data ?? ''),
+        roleSummary: stripBasicMarkdown(String(data ?? '')),
         responsibilities: [],
         requiredQualifications: [],
         niceToHave: [],
@@ -642,7 +850,7 @@ function formatResults(tool: string, data: any) {
     case 'linkedin': {
       const arr = Array.isArray(data) ? data : [];
       return arr.map((item) => ({
-        text: String(item?.text ?? ''),
+        text: stripBasicMarkdown(String(item?.text ?? '')),
         engagementScore: String(item?.engagementScore ?? ''),
         hashtags: String(item?.hashtags ?? ''),
         emojiSuggestions: Array.isArray(item?.emojiSuggestions)
@@ -653,7 +861,7 @@ function formatResults(tool: string, data: any) {
     case 'social_ad': {
       const arr = Array.isArray(data) ? data : [];
       return arr.map((item) => ({
-        text: String(item?.text ?? ''),
+        text: stripBasicMarkdown(String(item?.text ?? '')),
         platform: String(item?.platform ?? ''),
         predictedCtr: String(item?.predictedCtr ?? ''),
         trigger: String(item?.trigger ?? ''),
@@ -663,10 +871,10 @@ function formatResults(tool: string, data: any) {
     case 'summarizer': {
       if (data && typeof data === 'object') {
         return {
-          summary: String(data?.summary ?? ''),
+          summary: stripBasicMarkdown(String(data?.summary ?? '')),
           readability: String(data?.readability ?? ''),
           keyPoints: Array.isArray(data?.keyPoints)
-            ? data.keyPoints.map((t: any) => String(t))
+            ? data.keyPoints.map((t: any) => stripBasicMarkdown(String(t)))
             : [],
           keywords: Array.isArray(data?.keywords)
             ? data.keywords.map((t: any) => String(t))
@@ -676,7 +884,7 @@ function formatResults(tool: string, data: any) {
         };
       }
       return {
-        summary: String(data ?? ''),
+        summary: stripBasicMarkdown(String(data ?? '')),
         readability: '',
         keyPoints: [],
         keywords: [],
@@ -687,19 +895,19 @@ function formatResults(tool: string, data: any) {
     case 'cover_letter': {
       if (data && typeof data === 'object') {
         return {
-          text: String(data?.text ?? ''),
+          text: stripBasicMarkdown(String(data?.text ?? '')),
           atsScore: String(data?.atsScore ?? ''),
-          openingHook: String(data?.openingHook ?? ''),
-          closing: String(data?.closing ?? ''),
+          openingHook: stripBasicMarkdown(String(data?.openingHook ?? '')),
+          closing: stripBasicMarkdown(String(data?.closing ?? '')),
         };
       }
-      return { text: String(data ?? ''), atsScore: '', openingHook: '', closing: '' };
+      return { text: stripBasicMarkdown(String(data ?? '')), atsScore: '', openingHook: '', closing: '' };
     }
     case 'twitter_thread': {
       if (data && typeof data === 'object') {
         return {
           tweets: Array.isArray(data?.tweets)
-            ? data.tweets.map((t: any) => String(t))
+            ? data.tweets.map((t: any) => stripBasicMarkdown(String(t)))
             : [],
           engagementPrediction: String(data?.engagementPrediction ?? ''),
           hashtags: String(data?.hashtags ?? ''),
@@ -712,8 +920,8 @@ function formatResults(tool: string, data: any) {
         return {
           items: Array.isArray(data?.items)
             ? data.items.map((it: any) => ({
-                question: String(it?.question ?? ''),
-                answer: String(it?.answer ?? ''),
+                question: stripBasicMarkdown(String(it?.question ?? '')),
+                answer: stripBasicMarkdown(String(it?.answer ?? '')),
               }))
             : [],
           seoScore: String(data?.seoScore ?? ''),
@@ -728,7 +936,7 @@ function formatResults(tool: string, data: any) {
           segments: Array.isArray(data?.segments)
             ? data.segments.map((s: any) => ({
                 time: String(s?.time ?? ''),
-                line: String(s?.line ?? ''),
+                line: stripBasicMarkdown(String(s?.line ?? '')),
               }))
             : [],
           pacingWpm: Number(data?.pacingWpm ?? 0),
@@ -741,13 +949,25 @@ function formatResults(tool: string, data: any) {
     case 'blog_post': {
       const item = Array.isArray(data) ? data[0] : data;
       if (item && typeof item === 'object') {
+        // Handle array body
+        const bodyValue = (item as any)?.body ?? (item as any)?.content ?? '';
+        const rawBody = Array.isArray(bodyValue) ? bodyValue.join('\n\n') : String(bodyValue);
+        
+        const cleanedBody = cleanBlogBody(stripBasicMarkdown(rawBody));
+        
+        console.log('[API][generate] blog_post cleaning results:', {
+          rawLength: rawBody.length,
+          cleanedLength: cleanedBody.length,
+          hasTags: cleanedBody.includes('<')
+        });
+        
         return {
           title: stripBasicMarkdown(String((item as any)?.title ?? '')),
           slug_suggestion: stripBasicMarkdown(String((item as any)?.slug_suggestion ?? '')),
           outline: Array.isArray((item as any)?.outline)
             ? (item as any).outline.map((t: any) => stripBasicMarkdown(String(t ?? '')))
             : [],
-          body: stripBasicMarkdown(String((item as any)?.body ?? '')),
+          body: cleanedBody,
           meta_description: stripBasicMarkdown(String((item as any)?.meta_description ?? '')),
         };
       }
@@ -755,7 +975,7 @@ function formatResults(tool: string, data: any) {
         title: '',
         slug_suggestion: '',
         outline: [],
-        body: stripBasicMarkdown(String(item ?? data ?? '')),
+        body: cleanBlogBody(stripBasicMarkdown(String(item ?? data ?? ''))),
         meta_description: '',
       };
     }
@@ -874,38 +1094,34 @@ function formatResults(tool: string, data: any) {
       };
     }
     case 'blog_helper': {
-      const arr = Array.isArray(data) ? data : data ? [data] : [];
+      // Handle nested response structure: { response: [ { text: "..." }, ... ] }
+      let normalizedData = data;
+      if (data && typeof data === 'object' && !Array.isArray(data) && Array.isArray(data.response)) {
+        normalizedData = data.response;
+      }
+      
+      const arr = Array.isArray(normalizedData) ? normalizedData : normalizedData ? [normalizedData] : [];
       return arr.map((item: any) => {
         let text = '';
 
         if (item && typeof item === 'object') {
+          // Direct text field
           if (typeof item.text === 'string' && item.text.trim()) {
-            const raw = item.text.trim();
-
-            if ((raw.startsWith('{') || raw.startsWith('[')) && raw.includes('"outline"')) {
-              try {
-                const parsed = JSON.parse(raw);
-                if (Array.isArray((parsed as any)?.outline)) {
-                  text = (parsed as any).outline.map((line: any) => String(line ?? '')).join('\n');
-                } else {
-                  text = raw;
-                }
-              } catch {
-                text = raw;
-              }
-            } else {
-              text = raw;
-            }
-          } else if (Array.isArray((item as any).outline)) {
-            text = (item as any).outline.map((line: any) => String(line ?? '')).join('\n');
-          } else if (typeof (item as any).outline === 'string') {
-            text = String((item as any).outline);
-          } else if (typeof (item as any).content === 'string') {
-            text = String((item as any).content);
+            text = item.text.trim();
+          } else if (typeof item.content === 'string' && item.content.trim()) {
+            text = item.content.trim();
+          } else if (Array.isArray(item.outline)) {
+            text = item.outline.map((line: any) => String(line ?? '')).join('\n');
+          } else if (typeof item.outline === 'string') {
+            text = item.outline;
+          } else if (typeof item.body === 'string') {
+            text = item.body;
           } else {
-            try {
-              text = JSON.stringify(item, null, 2);
-            } catch {
+            // Fallback: extract any string value from the object
+            const values = Object.values(item).filter(v => typeof v === 'string' && (v as string).trim());
+            if (values.length > 0) {
+              text = values.join('\n\n');
+            } else {
               text = String(item ?? '');
             }
           }
@@ -915,89 +1131,85 @@ function formatResults(tool: string, data: any) {
           text = String(item ?? '');
         }
 
-        return { text };
+        return { text: stripBasicMarkdown(text) };
       });
     }
     case 'copy_helper': {
-      const arr = Array.isArray(data) ? data : data ? [data] : [];
+      // Handle nested response structure
+      let normalizedData = data;
+      if (data && typeof data === 'object' && !Array.isArray(data) && Array.isArray(data.response)) {
+        normalizedData = data.response;
+      }
+      const arr = Array.isArray(normalizedData) ? normalizedData : normalizedData ? [normalizedData] : [];
       return arr.map((item: any) => {
         if (typeof item === 'string') {
-          return { text: item };
+          return { text: stripBasicMarkdown(item) };
         }
         const text = typeof item?.text === 'string'
           ? item.text
-          : (() => {
-              try {
-                return JSON.stringify(item, null, 2);
-              } catch {
-                return String(item ?? '');
-              }
-            })();
-        return { text };
+          : typeof item?.content === 'string'
+            ? item.content
+            : String(item ?? '');
+        return { text: stripBasicMarkdown(text) };
       });
     }
     case 'social_helper': {
-      const cleanText = (value: string) => {
-        if (!value) return '';
-        let cleaned = value.replace(/\*/g, '');
-        cleaned = cleaned.replace(
-          /[\u{1F300}-\u{1FAFF}\u{1F600}-\u{1F64F}\u{2600}-\u{27BF}]/gu,
-          '',
-        );
-        cleaned = cleaned.replace(/\s{2,}/g, ' ').trim();
-        return cleaned;
-      };
-      const arr = Array.isArray(data) ? data : data ? [data] : [];
+      // Handle nested response structure
+      let normalizedData = data;
+      if (data && typeof data === 'object' && !Array.isArray(data) && Array.isArray(data.response)) {
+        normalizedData = data.response;
+      }
+      const arr = Array.isArray(normalizedData) ? normalizedData : normalizedData ? [normalizedData] : [];
       return arr.map((item: any) => {
         let base: string;
         if (typeof item === 'string') {
           base = item;
         } else if (typeof item?.text === 'string') {
           base = item.text;
+        } else if (typeof item?.content === 'string') {
+          base = item.content;
         } else {
-          try {
-            base = JSON.stringify(item, null, 2);
-          } catch {
-            base = String(item ?? '');
-          }
+          base = String(item ?? '');
         }
-        return { text: cleanText(base) };
+        return { text: stripBasicMarkdown(base) };
       });
     }
     case 'email_writer': {
-      const arr = Array.isArray(data) ? data : data ? [data] : [];
+      // Handle nested response structure
+      let normalizedData = data;
+      if (data && typeof data === 'object' && !Array.isArray(data) && Array.isArray(data.response)) {
+        normalizedData = data.response;
+      }
+      const arr = Array.isArray(normalizedData) ? normalizedData : normalizedData ? [normalizedData] : [];
       return arr.map((item: any) => {
         if (typeof item === 'string') {
-          return { text: item };
+          return { text: stripBasicMarkdown(item) };
         }
         const text = typeof item?.text === 'string'
           ? item.text
-          : (() => {
-              try {
-                return JSON.stringify(item, null, 2);
-              } catch {
-                return String(item ?? '');
-              }
-            })();
-        return { text };
+          : typeof item?.content === 'string'
+            ? item.content
+            : String(item ?? '');
+        return { text: stripBasicMarkdown(text) };
       });
     }
     case 'rewrite_helper': {
-      const arr = Array.isArray(data) ? data : data ? [data] : [];
+      // Handle nested response structure
+      let normalizedData = data;
+      if (data && typeof data === 'object' && !Array.isArray(data) && Array.isArray(data.response)) {
+        normalizedData = data.response;
+      }
+      const arr = Array.isArray(normalizedData) ? normalizedData : normalizedData ? [normalizedData] : [];
       return arr.map((item: any) => {
         if (typeof item === 'string') {
-          return { text: item };
+          return { text: stripBasicMarkdown(item) };
         }
         const text = typeof item?.text === 'string'
           ? item.text
-          : (() => {
-              try {
-                return JSON.stringify(item, null, 2);
-              } catch {
-                return String(item ?? '');
-              }
-            })();
-        return { text };
+          : typeof item?.content === 'string'
+            ? item.content
+            : String(item ?? '');
+        return { text: stripBasicMarkdown(text) };
       });
     }
     default:
@@ -1054,11 +1266,13 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const { tool, inputs, outputCount = 3, tone } = parsed.data;
+    const { tool, inputs, outputCount = 3, tone, brandVoiceId } = parsed.data;
 
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-    if (!apiKey) {
-      console.error('[API][generate] GEMINI_API_KEY / GOOGLE_API_KEY missing');
+    const openRouterKey = process.env.OPENROUTER_API_KEY;
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+    
+    if (!openRouterKey && !geminiKey) {
+      console.error('[API][generate] No API key found (OPENROUTER_API_KEY or GEMINI_API_KEY)');
       const fallback = buildFallbackResults(tool, inputs, outputCount);
       const t1 = Date.now();
       return res.status(200).json({
@@ -1112,50 +1326,113 @@ export default async function handler(req: any, res: any) {
     };
 
     const creditsCharged = TOOL_CREDIT_COST[tool] ?? 1;
-    let userCreditsBalance: number | null = null;
+    let orgCreditsBalance: number | null = null;
+    let orgId = getOrgIdFromHeader(req);
+    
+    // Fallback if orgId is missing from header
+    if (!orgId && supabaseAdmin && userId) {
+      try {
+        const { data: membership } = await supabaseAdmin
+          .from('organization_members')
+          .select('organization_id')
+          .eq('user_id', userId)
+          .order('created_at')
+          .limit(1)
+          .maybeSingle();
+        if (membership) {
+          orgId = membership.organization_id;
+          console.log('[API][generate] Fallback orgId found:', orgId);
+        }
+      } catch (err) {
+        console.warn('[API][generate] Org fallback error:', err);
+      }
+    }
+    
+    console.log('[API][generate] Credit check - userId:', userId, 'orgId:', orgId);
 
-    if (supabaseAdmin && userId) {
+    // Check organization credits (primary credit system for subscriptions)
+    if (supabaseAdmin && orgId) {
       try {
         const { data, error } = await supabaseAdmin
-          .from('users')
-          .select('credits_balance')
-          .eq('id', userId)
-          .single();
+          .from('organization_credits')
+          .select('balance_credits')
+          .eq('organization_id', orgId)
+          .maybeSingle();
         if (error) throw error;
-        if (data && typeof data.credits_balance === 'number') {
-          userCreditsBalance = data.credits_balance;
-          if (data.credits_balance < creditsCharged) {
-            console.warn('[API][generate] Insufficient credits', {
+        if (data && typeof data.balance_credits === 'number') {
+          orgCreditsBalance = data.balance_credits;
+          if (data.balance_credits < creditsCharged) {
+            console.warn('[API][generate] Insufficient organization credits', {
               required: creditsCharged,
-              balance: data.credits_balance,
+              balance: data.balance_credits,
+              orgId,
             });
             return res.status(402).json({
               error: 'INSUFFICIENT_CREDITS',
               message: 'Not enough credits to generate for this tool',
-              debug: { required: creditsCharged, balance: data.credits_balance },
+              debug: { required: creditsCharged, balance: data.balance_credits },
             });
           }
         }
       } catch (e: any) {
-        console.warn('[API][generate] Credits enforcement skipped', e?.message || e);
+        console.warn('[API][generate] Org credits check failed', e?.message || e);
       }
     }
 
     try {
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const modelName = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
-      const model = genAI.getGenerativeModel({ model: modelName });
+      // Prefer OpenRouter, fallback to Gemini
+      const useOpenRouter = !!openRouterKey;
+      const modelName = useOpenRouter 
+        ? (process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-001')
+        : (process.env.GEMINI_MODEL || 'gemini-2.0-flash');
+      
+      console.log(`[API][generate] Using ${useOpenRouter ? 'OpenRouter' : 'Gemini'} with model: ${modelName}`);
+      
+      const model = useOpenRouter
+        ? getOpenRouterModel(openRouterKey!, modelName)
+        : (() => {
+            const { GoogleGenerativeAI } = require('@google/generative-ai');
+            const genAI = new GoogleGenerativeAI(geminiKey);
+            return genAI.getGenerativeModel({ model: modelName });
+          })();
 
-      const prompt = buildPrompt(tool, inputs, outputCount, tone);
-      const finalPrompt = `${prompt}\n\nReturn strictly valid JSON. Do not include code fences.`;
+      let brandContext = '';
+      if (brandVoiceId && supabaseAdmin) {
+          try {
+            const { data: voice } = await supabaseAdmin
+                .from('brand_voices')
+                .select('*, brand_voice_samples(*)')
+                .eq('id', brandVoiceId)
+                .single();
+            
+            if (voice) {
+                const rules = (voice as any).rules || {};
+                const dos = Array.isArray(rules.dos) ? rules.dos.join(', ') : '';
+                const donts = Array.isArray(rules.donts) ? rules.donts.join(', ') : '';
+                const samples = (voice as any).brand_voice_samples?.map((s: any) => s.content).join('\n---\n') || '';
+
+                brandContext = `\n\n*** BRAND VOICE INSTRUCTIONS ***\nYou must adhere to the following Brand Voice profile:\n- Name: ${voice.name}\n- Description: ${voice.description || 'N/A'}\n- Tone: ${(voice as any).tone_tags?.join(', ') || 'N/A'}\n- DO: ${dos}\n- DON'T: ${donts}\n\n${samples ? `Style Samples (emulate this writing style):\n${samples}\n` : ''}*** END BRAND VOICE ***\n\n`;
+            }
+          } catch (e) {
+              console.warn('[Generate] Failed to fetch brand voice', e);
+          }
+      }
+      
+      console.log('[API][generate] Brand voice check', {
+        brandVoiceId: brandVoiceId || 'none',
+        hasBrandContext: brandContext.length > 0,
+        brandContextPreview: brandContext.slice(0, 200),
+      });
+
+      const prompt = buildPrompt(tool, inputs, outputCount, tone) + brandContext;
+      const finalPrompt = `${prompt}\n\nIMPORTANT: You MUST return your response as a valid JSON object. Do NOT wrap it in code fences like \`\`\`json. Do NOT include any text before or after the JSON. Start your response with { and end with }.`;
 
       // Dynamic max token limit based on length input
-      let maxOutputTokens = 8192;
+      let maxOutputTokens = 16384;
       if (tool === 'blog_post' || tool === 'article_from_outline') {
-        // 'short' is removed from UI, treating as medium just in case
-        // 'medium' -> ~2500 tokens (~1500 words)
-        // 'long' -> max tokens (8192) for 3000+ words
-        if (inputs.length === 'medium') maxOutputTokens = 2500;
+        // 'medium' -> ~4000 tokens (~2000 words)
+        // 'long' -> max tokens for 3000+ words
+        if (inputs.length === 'medium') maxOutputTokens = 4000;
       }
 
       const { text, attempts } = await generateWithRetry(model, finalPrompt, 3, {
@@ -1163,15 +1440,60 @@ export default async function handler(req: any, res: any) {
       });
 
       let parsedJson: any = null;
+      
+      // Strip markdown code fences if present (```json ... ``` or ```ai ... ```)
+      let cleanedText = text.trim();
+      
+      // Remove code fences - use greedy matching to get all content
+      // Match opening fence, capture everything until closing fence
+      const codeFenceRegex = /```(?:json|ai|javascript|js|typescript|ts)?\s*\n?([\s\S]*?)```/gi;
+      const fenceMatches = [...cleanedText.matchAll(codeFenceRegex)];
+      if (fenceMatches.length > 0) {
+        // Get the largest match (in case there are multiple code blocks)
+        cleanedText = fenceMatches.reduce((longest, match) => 
+          match[1].length > longest.length ? match[1] : longest, '').trim();
+      }
+      
+      // If still has code fence markers, remove them line by line
+      cleanedText = cleanedText
+        .replace(/^```[\w]*\s*$/gm, '')
+        .replace(/^```\s*$/gm, '')
+        .trim();
+      
+      console.log('[API][generate] Cleaned text preview:', cleanedText.slice(0, 200));
+      
       try {
-        parsedJson = JSON.parse(text);
+        parsedJson = JSON.parse(cleanedText);
       } catch {
-        const match = text.match(/\[.*\]|\{.*\}/s);
-        if (match) {
+        // Try to extract JSON object or array from the text
+        const jsonMatch = cleanedText.match(/(\{[\s\S]*\})/);
+        if (jsonMatch) {
           try {
-            parsedJson = JSON.parse(match[0]);
+            parsedJson = JSON.parse(jsonMatch[1]);
           } catch {
-            parsedJson = null;
+            // Try to find a valid JSON by looking for balanced braces
+            const startIdx = cleanedText.indexOf('{');
+            if (startIdx !== -1) {
+              let depth = 0;
+              let endIdx = -1;
+              for (let i = startIdx; i < cleanedText.length; i++) {
+                if (cleanedText[i] === '{') depth++;
+                else if (cleanedText[i] === '}') {
+                  depth--;
+                  if (depth === 0) {
+                    endIdx = i;
+                    break;
+                  }
+                }
+              }
+              if (endIdx !== -1) {
+                try {
+                  parsedJson = JSON.parse(cleanedText.slice(startIdx, endIdx + 1));
+                } catch {
+                  parsedJson = null;
+                }
+              }
+            }
           }
         }
       }
@@ -1186,7 +1508,7 @@ export default async function handler(req: any, res: any) {
       ]);
 
       if (!parsedJson && longFormTools.has(tool)) {
-        const safeRaw = stripBasicMarkdown(String(text || ''));
+        const safeRaw = cleanBlogBody(stripBasicMarkdown(String(text || '')));
         switch (tool) {
           case 'blog_post':
             parsedJson = {
@@ -1263,39 +1585,54 @@ export default async function handler(req: any, res: any) {
         });
       }
 
+      // Debug logging for blog_post to trace body field issue
+      if (tool === 'blog_post') {
+        const bodyField = parsedJson?.body || parsedJson?.content || '';
+        console.log('[API][generate] blog_post parsed fields:', {
+          hasTitle: !!parsedJson?.title,
+          hasBody: !!bodyField,
+          bodyLength: bodyField?.length || 0,
+          outlineLength: parsedJson?.outline?.length || 0,
+          allKeys: Object.keys(parsedJson || {})
+        });
+      }
+
       const formatted = formatResults(tool, parsedJson);
 
-      if (supabaseAdmin && userId && userCreditsBalance !== null) {
+      // Deduct from organization credits
+      if (supabaseAdmin && orgId && orgCreditsBalance !== null) {
         try {
-          const newBalance = Math.max(0, Number(userCreditsBalance) - Number(creditsCharged));
+          const newBalance = Math.max(0, Number(orgCreditsBalance) - Number(creditsCharged));
           await supabaseAdmin
-            .from('users')
-            .update({ credits_balance: newBalance })
-            .eq('id', userId);
-          console.debug('[API][generate] Credits deducted', {
-            userId,
-            oldBalance: userCreditsBalance,
+            .from('organization_credits')
+            .update({ balance_credits: newBalance })
+            .eq('organization_id', orgId);
+          console.log('[API][generate] Organization credits deducted', {
+            orgId,
+            oldBalance: orgCreditsBalance,
             newBalance,
+            creditsCharged,
           });
         } catch (e: any) {
-          console.warn('[API][generate] Credits deduction failed', e?.message || e);
+          console.warn('[API][generate] Organization credits deduction failed', e?.message || e);
         }
       }
 
+      // Log usage to usage_events table (for analytics)
       if (supabaseAdmin && userId) {
         try {
           await supabaseAdmin
-            .from('tool_usage')
+            .from('usage_events')
             .insert({
               user_id: userId,
-              tool_name: tool,
-              input_tokens_used: null,
-              output_tokens_used: null,
-              timestamp: new Date().toISOString(),
+              organization_id: orgId || null,
+              tool: tool,
+              credits: creditsCharged,
+              metadata: { inputs: Object.keys(inputs) },
             });
-          console.log('[API][generate] Usage logged');
+          console.log('[API][generate] Usage event logged to analytics');
         } catch (err: any) {
-          console.error('[API][generate] Usage log failed', err);
+          console.error('[API][generate] Usage event log failed', err);
         }
       }
 

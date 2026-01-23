@@ -341,7 +341,7 @@ const Index = () => {
               <h4 className="font-bold uppercase mb-4">Company</h4>
               <ul className="space-y-2 text-sm font-medium">
                 <li><Link to="/about" className="hover:text-primary">About</Link></li>
-                <li><Link to="/#pricing" className="hover:text-primary">Pricing</Link></li>
+                <li><Link to="/pricing" className="hover:text-primary">Pricing</Link></li>
               </ul>
             </div>
             

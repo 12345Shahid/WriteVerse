@@ -1,0 +1,114 @@
+# Walkthrough: CRM, API Access & SSO Implementation
+
+This document covers the features implemented based on feature-analysis-dec2024.md.
+
+---
+
+## 1. CRM Connection UI
+
+**Purpose:** Allow users to connect CRM (HubSpot, Salesforce, Pipedrive) from Embed Settings.
+
+### Location
+- **Settings → Embed Settings → CRM Integration** section
+
+### Files Created/Modified
+- [AgentCRMConnector.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/components/AgentCRMConnector.tsx) - New component
+- [EmbedSettings.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/pages/settings/EmbedSettings.tsx) - Added CRM section
+- [agents.js:232-264](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/agents.js#L232-L264) - Generic `save_to_crm` tool
+- [agents.js:494-580](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/agents.js#L494-L580) - Multi-CRM handler
+
+### How It Works
+1. User sees CRM cards (HubSpot, Salesforce, Pipedrive)
+2. Clicking "Connect" initiates Composio OAuth
+3. Once connected, agent has `save_to_crm` tool available
+4. Agent's system prompt includes CRM capability awareness
+
+### Testing
+1. Go to `/settings/embed`
+2. Select an agent
+3. Scroll to "CRM Integration"
+4. Click "Connect" on HubSpot
+5. Complete OAuth flow
+6. Chat with agent and capture a lead
+
+---
+
+## 2. API Access (Business Tier)
+
+**Purpose:** REST API for programmatic content generation.
+
+### Endpoints
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/api/v1/tools` | None | List available tools |
+| POST | `/api/v1/generate` | Bearer token | Generate content |
+
+### Files Created/Modified
+- [api/v1/generate.ts](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/api/v1/generate.ts) - Generate endpoint
+- [api/v1/tools.ts](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/api/v1/tools.ts) - Tools list
+- [server/index.js:5239-5370](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/index.js#L5239-L5370) - Express routes
+- [sql/SQL57_api_usage_logs.sql](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/sql/SQL57_api_usage_logs.sql) - Usage logging
+
+### Rate Limits
+- 100 requests/minute
+- 10,000 requests/day
+
+### Testing
+```bash
+# List tools (no auth)
+curl http://localhost:8787/api/v1/tools
+
+# Generate (requires Business tier)
+curl -X POST http://localhost:8787/api/v1/generate \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"tool": "email_subject", "inputs": {"topic": "Product launch"}}'
+```
+
+---
+
+## 3. SSO/SAML (WorkOS)
+
+**Purpose:** Enterprise single sign-on for organizations.
+
+### Location
+- **Settings → SSO Settings** (`/settings/sso`)
+
+### Files Created
+- [server/lib/workos.js](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/lib/workos.js) - WorkOS SDK integration
+- [SSOSettings.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/pages/settings/SSOSettings.tsx) - Configuration UI
+
+### Setup Required
+1. Create WorkOS account at [workos.com](https://workos.com)
+2. Add to `.env`:
+   ```
+   WORKOS_API_KEY=sk_xxxxx
+   WORKOS_CLIENT_ID=client_xxxxx
+   ```
+3. Create organization in WorkOS dashboard
+4. Configure identity provider (Okta, Azure AD, etc.)
+5. Copy Organization ID to Settings → SSO Settings
+
+### Testing
+1. Go to `/settings/sso`
+2. Enter WorkOS Organization ID
+3. Add allowed email domains
+4. Save configuration
+5. Log out and sign in via SSO
+
+---
+
+## Environment Variables Summary
+
+| Variable | Feature | Required |
+|----------|---------|----------|
+| `COMPOSIO_API_KEY` | CRM Integration | ✅ |
+| `WORKOS_API_KEY` | SSO | Only for Enterprise |
+| `WORKOS_CLIENT_ID` | SSO | Only for Enterprise |
+
+---
+
+## SQL Migrations to Run
+
+Execute in Supabase SQL Editor:
+- [SQL57_api_usage_logs.sql](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/sql/SQL57_api_usage_logs.sql)

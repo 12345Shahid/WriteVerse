@@ -1,0 +1,88 @@
+# Walkthrough: Email, Escalation & CRM Integration
+
+This document covers testing and usage of three agent features.
+
+---
+
+## 1. Email Channel
+
+**What it does:** Agents can send emails during chat conversations.
+
+### Setup
+Add to `.env`:
+```
+RESEND_API_KEY=re_xxxxxxxxxxxxx
+```
+Get a free key at [resend.com](https://resend.com)
+
+### How to Test
+1. Start servers: `npm run dev:all`
+2. Chat with an agent
+3. Say: *"Send me a test email to myemail@example.com"*
+4. Agent calls `send_email` tool
+5. Check your inbox
+
+### Code Location
+- Tool definition: [agents.js:217-230](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/agents.js#L217-L230)
+- Execution handler: [agents.js:446-478](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/agents.js#L446-L478)
+- Email service: [server/resend.ts](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/resend.ts)
+
+---
+
+## 2. Advanced Escalation
+
+**What it does:** Agents can escalate to human support.
+
+### How to Test
+1. Chat with an agent
+2. Say: *"I need to talk to a human"* or *"connect me to support"*
+3. Agent calls `handoff_to_human` tool
+4. Session status changes to `escalated`
+5. Check: **Settings → Embed Settings → Human Support → Open Support Inbox**
+
+### What Happens
+- Session marked as `escalated` in database
+- Appears in escalated inbox
+- (If Novu configured) Notification sent to org admin
+
+### Code Location
+- Tool definition: [agents.js:202-214](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/agents.js#L202-L214)
+- Execution handler: [agents.js:391-443](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/agents.js#L391-L443)
+
+---
+
+## 3. CRM Integration (HubSpot)
+
+**What it does:** Agents can create contacts in HubSpot CRM from chat leads.
+
+### Setup
+1. Add `COMPOSIO_API_KEY` to `.env`
+2. Go to **Settings → Integrations**
+3. Connect **HubSpot** via Composio OAuth
+
+### How to Test
+1. Chat with an agent
+2. Provide lead info: *"My name is John Doe, email john@example.com, company Acme Inc"*
+3. Say: *"Save my contact to CRM"* or agent auto-saves when lead collected
+4. Agent calls `create_hubspot_contact` tool
+5. Check HubSpot: Contact appears with name, email, company
+
+### Verification
+- Terminal shows: `[Agent][HubSpot] Creating contact: john@example.com`
+- HubSpot dashboard shows new contact
+- If notes provided, engagement/note is also created
+
+### Code Location
+- Tool definition: [agents.js:232-250](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/agents.js#L232-L250)
+- Execution handler: [agents.js:480-540](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/agents.js#L480-L540)
+- Composio service: [server/lib/composio.js](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/lib/composio.js)
+
+---
+
+## Environment Variables Summary
+
+| Variable | Required For | How to Get |
+|----------|--------------|------------|
+| `RESEND_API_KEY` | Email Channel | [resend.com](https://resend.com) |
+| `COMPOSIO_API_KEY` | CRM Integration | [composio.dev](https://composio.dev) |
+| `NOVU_API_KEY` | Escalation Notifications | [novu.co](https://novu.co) |

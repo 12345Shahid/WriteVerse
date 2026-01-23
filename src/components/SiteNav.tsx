@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { Button } from "@/components/ui/button-brutal";
@@ -13,6 +13,7 @@ import {
 export const SiteNav = () => {
   const [tokensLeft, setTokensLeft] = useState<number | null>(null);
   const [user, setUser] = useState<any>(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
     let unsub: (() => void) | null = null;
@@ -34,6 +35,18 @@ export const SiteNav = () => {
     })();
     return () => { if (unsub) unsub(); };
   }, []);
+
+  const handleSignOut = async () => {
+    try {
+      if (!supabase) return;
+      await supabase.auth.signOut();
+    } catch (e) {
+      console.error("[SiteNav] signOut failed", e);
+    } finally {
+      setUser(null);
+      navigate("/auth");
+    }
+  };
 
   return (
     <header className="border-b-4 border-black bg-background sticky top-0 z-50">
@@ -106,10 +119,11 @@ export const SiteNav = () => {
                 <Link to="/results">
                   <Button size="sm">Saved</Button>
                 </Link>
+                <Button variant="outline" size="sm" onClick={handleSignOut}>Sign Out</Button>
               </>
             ) : (
               <>
-                <Link to="/#pricing" className="hidden md:block font-bold hover:text-primary transition-colors">
+                <Link to="/pricing" className="hidden md:block font-bold hover:text-primary transition-colors">
                   Pricing
                 </Link>
                 <Link to="/auth">

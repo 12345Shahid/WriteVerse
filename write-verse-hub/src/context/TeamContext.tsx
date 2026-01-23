@@ -6,7 +6,7 @@ interface TeamContextType {
   teams: Team[];
   currentTeam: Team | null;
   isLoading: boolean;
-  refreshTeams: () => Promise<void>;
+  refreshTeams: (retryOnEmpty?: boolean) => Promise<void>;
   switchTeam: (teamId: string) => void;
 }
 
@@ -17,7 +17,7 @@ export const TeamProvider = ({ children }: { children: ReactNode }) => {
   const [currentTeam, setCurrentTeam] = useState<Team | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  const refreshTeams = async () => {
+  const refreshTeams = async (retryOnEmpty: boolean = false) => {
     try {
       setIsLoading(true);
       const session = await supabase.auth.getSession();
@@ -27,7 +27,21 @@ export const TeamProvider = ({ children }: { children: ReactNode }) => {
         return;
       }
 
-      const data = await listTeams();
+      let data = await listTeams();
+      
+      // If no teams found and retryOnEmpty is true, retry a few times
+      // This handles the race condition after fresh signup
+      if ((!data || data.length === 0) && retryOnEmpty) {
+        let retries = 0;
+        const maxRetries = 4;
+        while ((!data || data.length === 0) && retries < maxRetries) {
+          console.log(`[TeamContext] No teams found, retrying... (${retries + 1}/${maxRetries})`);
+          await new Promise(resolve => setTimeout(resolve, 600));
+          data = await listTeams();
+          retries++;
+        }
+      }
+      
       setTeams(data);
       
       // Restore selected team from localStorage or default to first
@@ -58,8 +72,10 @@ export const TeamProvider = ({ children }: { children: ReactNode }) => {
     refreshTeams();
     
     // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(() => {
-      refreshTeams();
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+      // On sign in, retry if teams are empty (handles fresh signup race condition)
+      const shouldRetry = event === 'SIGNED_IN';
+      refreshTeams(shouldRetry);
     });
 
     return () => subscription.unsubscribe();

@@ -22,7 +22,7 @@ const JoinPage = () => {
     }
     
     // Peek invite details
-    fetch(`http://localhost:8787/api/teams/invite/${token}`)
+    fetch(`/api/teams/invite/${token}`)
       .then(async (res) => {
         const data = await res.json();
         if (!res.ok) throw new Error(data.message || data.error);
@@ -54,7 +54,7 @@ const JoinPage = () => {
         return;
       }
 
-      const res = await fetch('http://localhost:8787/api/teams/join', {
+      const res = await fetch('/api/teams/join', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -26,6 +26,7 @@ import PublicShare from "./pages/PublicShare";
 import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
 import DebugSentry from "./pages/DebugSentry";
+import Pricing from "./pages/Pricing";
 
 const queryClient = new QueryClient();
 
@@ -45,6 +46,7 @@ const App = () => (
           <Route path="/about" element={<About />} />
           <Route path="/privacy" element={<Privacy />} />
           <Route path="/terms" element={<Terms />} />
+          <Route path="/pricing" element={<Pricing />} />
           <Route path="/debug/sentry" element={<DebugSentry />} />
           <Route path="/tools/email-subject" element={<EmailSubjectTool />} />
           <Route path="/tools/resume" element={<ResumeTool />} />

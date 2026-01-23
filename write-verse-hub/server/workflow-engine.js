@@ -1,48 +1,122 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { createClient } from '@supabase/supabase-js';
+import { chatWithAgent } from './agents.js';
+import { OpenRouterClient } from './lib/openrouter.js';
+import { recordUsage } from './meter.js';
+import { sendWorkflowStepEvent, sendWorkflowCompletedEvent } from './lib/paragon.js';
 
 // Initialize clients (same as index.js)
 const genAI = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
+const openRouter = process.env.OPENROUTER_API_KEY ? new OpenRouterClient(process.env.OPENROUTER_API_KEY) : null;
 const supabaseAdmin = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null;
 
-/**
- * Resolve input parameters by substituting variables like {{step1.result.text}}
- */
-function resolveInputs(params, inputMap, context) {
-  const resolved = { ...params };
-  
-  for (const [key, valueTemplate] of Object.entries(inputMap || {})) {
-    if (typeof valueTemplate === 'string' && valueTemplate.startsWith('{{') && valueTemplate.endsWith('}}')) {
-      // e.g. {{step1.result.text}}
-      const path = valueTemplate.slice(2, -2).trim(); // step1.result.text
-      const parts = path.split('.');
-      const stepId = parts[0];
-      
-      if (context[stepId]) {
-        // Traverse the object path
+function resolveVariable(path, context) {
+    const parts = path.split('.');
+    const stepId = parts[0];
+    
+    if (stepId === 'initial' && context.initial) {
+        let val = context.initial;
+        for (let i = 1; i < parts.length; i++) {
+            if (val) val = val[parts[i]];
+        }
+        return val;
+    }
+
+    if (context[stepId]) {
         let val = context[stepId];
         for (let i = 1; i < parts.length; i++) {
             if (val) val = val[parts[i]];
         }
-        resolved[key] = val;
-      }
+        return val;
+    }
+    return null;
+}
+
+function resolveInputs(params, inputMap, context, loopItem = null) {
+  const resolved = { ...params };
+  
+  for (const [key, valueTemplate] of Object.entries(inputMap || {})) {
+    if (typeof valueTemplate === 'string') {
+      // Replace all occurrences of {{path}}
+      resolved[key] = valueTemplate.replace(/\{\{([^}]+)\}\}/g, (match, path) => {
+        const cleanPath = path.trim();
+        if (cleanPath === 'loop.item' && loopItem !== null) {
+            return String(loopItem);
+        }
+        
+        const val = resolveVariable(cleanPath, context);
+        if (val !== null && val !== undefined) {
+             if (typeof val === 'object') return JSON.stringify(val);
+             return String(val);
+        }
+        return match; // Keep {{placeholder}} if not found
+      });
     } else {
-      // Literal value
       resolved[key] = valueTemplate;
     }
   }
   return resolved;
 }
 
-/**
- * Execute a single workflow
- */
+function evaluateCondition(condition, context) {
+    if (!condition) return true;
+    
+    let left = '';
+    let operator = '';
+    let right = '';
+
+    if (condition.includes(' contains ')) {
+        [left, right] = condition.split(' contains ');
+        operator = 'contains';
+    } else if (condition.includes(' == ')) {
+        [left, right] = condition.split(' == ');
+        operator = '==';
+    } else if (condition.includes(' != ')) {
+        [left, right] = condition.split(' != ');
+        operator = '!=';
+    } else {
+        return true;
+    }
+
+    let leftVal = left.trim();
+    if (leftVal.startsWith('{{') && leftVal.endsWith('}}')) {
+        leftVal = resolveVariable(leftVal.slice(2, -2).trim(), context);
+    }
+    
+    let rightVal = right.trim();
+    if (rightVal.startsWith('"') || rightVal.startsWith("'")) rightVal = rightVal.slice(1, -1);
+    else if (rightVal.startsWith('{{') && rightVal.endsWith('}}')) {
+        rightVal = resolveVariable(rightVal.slice(2, -2).trim(), context);
+    }
+
+    if (operator === 'contains') {
+        return String(leftVal || '').toLowerCase().includes(String(rightVal || '').toLowerCase());
+    }
+    if (operator === '==') return String(leftVal) === String(rightVal);
+    if (operator === '!=') return String(leftVal) !== String(rightVal);
+
+    return true;
+}
+
 export async function runWorkflow(workflowId, userId, orgId, initialInputs) {
   if (!supabaseAdmin || !genAI) throw new Error('Server misconfigured');
 
-  // 1. Create Execution Record
+  // Resolve Model
+  let provider = 'google';
+  let selectedModel = 'gemini-2.0-flash';
+  
+  if (initialInputs && initialInputs.modelId) {
+      try {
+          const { data: m } = await supabaseAdmin.from('ai_models').select('*').eq('id', initialInputs.modelId).single();
+          if (m) {
+              provider = m.provider;
+              selectedModel = m.id;
+          }
+      } catch (e) {}
+  }
+
   const { data: execution, error: createError } = await supabaseAdmin
     .from('workflow_executions')
     .insert({
@@ -57,11 +131,9 @@ export async function runWorkflow(workflowId, userId, orgId, initialInputs) {
     .single();
 
   if (createError) throw createError;
-
   const executionId = execution.id;
 
   try {
-    // 2. Fetch Workflow Definition
     const { data: workflow } = await supabaseAdmin
       .from('workflows')
       .select('steps')
@@ -76,42 +148,56 @@ export async function runWorkflow(workflowId, userId, orgId, initialInputs) {
     }
 
     const context = {
-        initial: initialInputs // Access via {{initial.topic}}
+        initial: initialInputs 
     };
 
-    // 3. Execute Steps
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
       
-      // Update status
       await supabaseAdmin
         .from('workflow_executions')
         .update({ current_step_index: i })
         .eq('id', executionId);
 
-      // Prepare Inputs
-      const inputs = resolveInputs(step.params, step.input_map, context);
+      // Condition Check
+      if (step.if) {
+          const shouldRun = evaluateCondition(step.if, context);
+          if (!shouldRun) {
+              continue;
+          }
+      }
 
-      // Execute Tool (Call LLM)
-      // We need to reuse the buildPrompt/generate logic from index.js
-      // For MVP, I'll inline a simplified version or we can import if we refactor index.js
-      // I'll implement a direct call here for now to avoid huge refactor risks
+      // Loop Check
+      if (step.loop) {
+          let iterations = [];
+          if (step.loop.count) {
+              iterations = Array.from({ length: Number(step.loop.count) }, (_, idx) => idx);
+          } else if (step.loop.items && typeof step.loop.items === 'string' && step.loop.items.startsWith('{{')) {
+              const list = resolveVariable(step.loop.items.slice(2, -2).trim(), context);
+              if (Array.isArray(list)) iterations = list;
+          }
+          
+          if (iterations.length > 10) iterations = iterations.slice(0, 10);
+
+          const loopResults = [];
+          for (const item of iterations) {
+              const inputs = resolveInputs(step.params, step.input_map, context, item);
+              const res = await executeToolStep(step.tool, inputs, { userId, orgId, provider, selectedModel, workflowId });
+              loopResults.push(res);
+          }
+          context[step.id] = loopResults;
+      } else {
+          const inputs = resolveInputs(step.params, step.input_map, context);
+          const result = await executeToolStep(step.tool, inputs, { userId, orgId, provider, selectedModel, workflowId });
+          context[step.id] = result;
+      }
       
-      const result = await executeToolStep(step.tool, inputs);
-      
-      // Store Result
-      context[step.id] = result; // Save for future steps
-      
-      // Persist partial results
       await supabaseAdmin
         .from('workflow_executions')
-        .update({ 
-            results: context 
-        })
+        .update({ results: context })
         .eq('id', executionId);
     }
 
-    // 4. Complete
     await supabaseAdmin
       .from('workflow_executions')
       .update({ 
@@ -120,10 +206,43 @@ export async function runWorkflow(workflowId, userId, orgId, initialInputs) {
       })
       .eq('id', executionId);
 
+    // Paragon Integration - Send workflow completed event
+    // This triggers any workflows connected to user's integrations
+    sendWorkflowCompletedEvent(userId, workflowId, context, { orgId })
+      .catch(e => console.warn('[Paragon] Workflow event failed:', e.message));
+
+    // Composio Integration - Push workflow output to connected destinations
+    try {
+      const { isComposioEnabled, executeTool } = await import('./lib/composio.js');
+      if (isComposioEnabled()) {
+        const { data: workflowOutputs } = await supabaseAdmin
+          .from('workflow_integrations')
+          .select('*')
+          .eq('workflow_id', workflowId)
+          .eq('is_enabled', true)
+          .is('step_id', null); // step_id = null means "on completion"
+
+        if (workflowOutputs?.length > 0) {
+          for (const config of workflowOutputs) {
+            executeTool(userId, config.action_name, {
+              ...config.action_params,
+              workflowId,
+              results: context
+            }, {
+              source: 'workflow_output',
+              orgId
+            }).catch(e => console.warn('[Composio] Workflow output sync failed:', e.message));
+          }
+          console.log(`[Composio] Triggered ${workflowOutputs.length} workflow output destinations`);
+        }
+      }
+    } catch (e) {
+      console.warn('[Composio] Workflow output check failed:', e.message);
+    }
+
     return { success: true, results: context };
 
   } catch (err) {
-    // Log Failure
     await supabaseAdmin
       .from('workflow_executions')
       .update({ 
@@ -136,9 +255,60 @@ export async function runWorkflow(workflowId, userId, orgId, initialInputs) {
   }
 }
 
-// Reuse prompt logic (simplified for workflow context)
-async function executeToolStep(tool, inputs) {
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' }, { apiVersion: 'v1' });
+function parseJSONSafe(text) {
+  let clean = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+  try {
+    return JSON.parse(clean);
+  } catch (e) {
+    const firstOpen = clean.indexOf('{');
+    const firstArray = clean.indexOf('[');
+    let start = -1;
+    let end = -1;
+    
+    if (firstOpen !== -1 && (firstArray === -1 || firstOpen < firstArray)) {
+        start = firstOpen;
+        end = clean.lastIndexOf('}');
+    } else if (firstArray !== -1) {
+        start = firstArray;
+        end = clean.lastIndexOf(']');
+    }
+    
+    if (start !== -1 && end !== -1) {
+        const substring = clean.substring(start, end + 1);
+        try {
+            return JSON.parse(substring);
+        } catch (e2) {
+            try {
+                return new Function('return ' + substring)();
+            } catch (e3) {}
+        }
+    }
+    try {
+        return new Function('return ' + clean)();
+    } catch (e4) {}
+    
+    throw e;
+  }
+}
+
+async function executeToolStep(tool, inputs, meta) {
+  if (tool === 'custom_agent') {
+      const { agentId, message } = inputs;
+      if (!agentId || !message) throw new Error("Agent ID and Message required for custom agent step");
+      const result = await chatWithAgent(meta.userId, meta.orgId, agentId, message);
+      return result;
+  }
+
+  let model;
+  if (meta.provider === 'openrouter' && openRouter) {
+      model = openRouter.getGenerativeModel({ model: meta.selectedModel });
+  } else {
+      const modelName = (meta.provider === 'google' && meta.selectedModel) ? meta.selectedModel : 'gemini-2.0-flash';
+      model = genAI.getGenerativeModel({ 
+          model: modelName,
+          generationConfig: { temperature: 0.9 }
+      }, { apiVersion: 'v1' });
+  }
   
   const tone = inputs.tone || '';
   const outputCount = inputs.outputCount || 3;
@@ -206,7 +376,7 @@ async function executeToolStep(tool, inputs) {
       const taskInstruction = isLong
         ? 'Write a complete, extensive blog article. Add detailed explanations, multiple examples, case studies, and practical applications in every section. The total word count must comfortably exceed 3000 words.'
         : 'Write a standard blog post. Aim for around 1500 words with clear headings.';
-      prompt = `${role}\nTopic: ${inputs.topic}\nTarget audience: ${inputs.audience || 'general readers'}\nGoal: ${inputs.goal || 'educate and engage'}\nPrimary keyword: ${inputs.primaryKeyword || 'N/A'}\nSecondary keywords: ${inputs.secondaryKeywords || 'N/A'}\nOutline mode: ${inputs.outlineMode || 'auto'} (auto | custom)\nCustom outline (if any):\n${inputs.customOutline || 'N/A'}\nTarget length: ${inputs.length}\nTone: ${inputs.tone || tone || 'neutral'}\n\n${taskInstruction}\n\nFormatting rules (important):\n- Use plain text only.\n- Do not use markdown syntax (no *, **, bullet markers, or code fences).\n- Do not include markdown headings like #, ##, or code fences.\n- You may still use numbered lists like '1.' or '2.' when helpful.\n\nReturn a single JSON object with fields:\n- title\n- slug_suggestion\n- outline (array of heading strings)\n- body (full text as a single string)\n- meta_description`;
+      prompt = `${role}\nTopic: ${inputs.topic}\nTarget audience: ${inputs.audience || 'general readers'}\nGoal: ${inputs.goal || 'educate and engage'}\nPrimary keyword: ${inputs.primaryKeyword || 'N/A'}\nSecondary keywords: ${inputs.secondaryKeywords || 'N/A'}\nOutline mode: ${inputs.outlineMode || 'auto'} (auto | custom)\nCustom outline (if any):\n${inputs.customOutline || 'N/A'}\nTarget length: ${inputs.length}\nTone: ${inputs.tone || tone || 'neutral'}\n\n${taskInstruction}\n\nFormatting rules (important):\n- Use plain text only.\n- Do not use markdown syntax (no *, **, bullet markers, or code fences).\n- Do not include markdown headings like #, ##, or code fences.\n- You may still use numbered lists like '1.' or '2.' when helpful.\n- ESCAPE ALL QUOTES and NEWLINES inside JSON strings. Return VALID JSON.\n\nReturn a single JSON object with fields:\n- title\n- slug_suggestion\n- outline (array of heading strings)\n- body (full text as a single string)\n- meta_description`;
       break;
     }
     case 'article_from_outline': {
@@ -217,7 +387,7 @@ async function executeToolStep(tool, inputs) {
       const articleTaskInstruction = isArtLong
         ? 'Expand each outline point into multiple rich paragraphs with examples, data, and detailed explanations. The total word count must comfortably exceed 3000 words.'
         : 'Write a balanced article. The total word count should be around 1500 words.';
-      prompt = `${artRole} Expand the provided outline.\nTitle or topic: ${inputs.topic}\nOutline:\n${inputs.outline}\nTarget audience: ${inputs.audience || 'general readers'}\nTarget length: ${inputs.length}\nTone: ${inputs.tone || tone || 'neutral'}\n\n${articleTaskInstruction}\n\nFormatting rules (important):\n- Use plain text only.\n- Do not use markdown syntax (no *, **, bullet markers, or code fences).\n- Do not include markdown headings like #, ##, or code fences.\n- You may still use numbered lists like '1.' or '2.' when helpful.\n\nReturn a single JSON object with fields:\n- title\n- outline (normalized array of headings)\n- body (full text as a single string)`;
+      prompt = `${artRole} Expand the provided outline.\nTitle or topic: ${inputs.topic}\nOutline:\n${inputs.outline}\nTarget audience: ${inputs.audience || 'general readers'}\nTarget length: ${inputs.length}\nTone: ${inputs.tone || tone || 'neutral'}\n\n${articleTaskInstruction}\n\nFormatting rules (important):\n- Use plain text only.\n- Do not use markdown syntax (no *, **, bullet markers, or code fences).\n- Do not include markdown headings like #, ##, or code fences.\n- You may still use numbered lists like '1.' or '2.' when helpful.\n- ESCAPE ALL QUOTES and NEWLINES inside JSON strings. Return VALID JSON.\n\nReturn a single JSON object with fields:\n- title\n- outline (normalized array of headings)\n- body (full text as a single string)\n- meta_description`;
       break;
     }
     case 'seo_blog_optimizer': {
@@ -248,18 +418,49 @@ async function executeToolStep(tool, inputs) {
       break;
   }
 
-  const result = await model.generateContent(prompt + "\n\nIMPORTANT: Return strictly valid JSON. Do not use Markdown code blocks.");
-  const text = result.response.text();
-  
-  try {
-    // removing markdown code fences if present
-    const clean = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    const parsed = JSON.parse(clean);
-    return formatResults(tool, parsed);
-  } catch (e) {
-    console.warn("[Workflow] JSON Parse failed", text.slice(0, 100));
-    return { raw_text: text, error: "Model returned non-JSON" };
+  let currentPrompt = prompt + "\n\nIMPORTANT: Return strictly valid JSON. Do not use Markdown code blocks. Escape all quotes and newlines inside strings.";
+  let retries = 0;
+  const maxRetries = 2;
+  let lastError = null;
+  let lastText = "";
+
+  while (retries <= maxRetries) {
+      try {
+          const result = await model.generateContent(currentPrompt);
+          const text = result.response.text();
+          lastText = text;
+          
+          // Track Usage
+          try {
+            const tokens = Math.ceil(text.length / 4);
+            await recordUsage({
+                organization_id: meta.orgId,
+                user_id: meta.userId,
+                tool: `workflow:${meta.workflowId}`, 
+                provider: meta.provider,
+                action: 'step_generation',
+                units: tokens,
+                credits: tokens,
+                metadata: { tool, workflowId: meta.workflowId }
+            });
+          } catch (e) {
+             console.warn('[Workflow] Usage tracking failed', e);
+          }
+
+          const parsed = parseJSONSafe(text);
+          return formatResults(tool, parsed);
+      } catch (e) {
+          console.warn(`[Workflow] JSON Parse failed (attempt ${retries + 1})`, e.message);
+          lastError = e;
+          retries++;
+          
+          if (retries <= maxRetries) {
+              currentPrompt = `${prompt}\n\nPREVIOUS OUTPUT CAUSED ERROR:\n${lastError.message}\n\nEnsure you create VALID JSON. Escape all quotes inside strings (e.g. \\") and all newlines (e.g. \\n). Do not leave trailing commas.`;
+          }
+      }
   }
+
+  return { raw_text: lastText, error: "Model returned non-JSON after retries: " + lastError?.message };
 }
 
 function stripBasicMarkdown(text) {

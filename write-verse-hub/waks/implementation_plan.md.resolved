@@ -1,0 +1,207 @@
+# Implementation Plan: API Expansion, Outrank SEO & Natural Write
+
+## Overview
+
+Three major feature sets to implement:
+
+| Feature | Priority | Complexity |
+|---------|----------|------------|
+| **API Management Page + Expanded Endpoints** | HIGH | Medium |
+| **Outrank SEO Features** | MEDIUM | High |
+| **Natural Write Mode (Humanizer)** | HIGH | Medium |
+
+---
+
+## Part 1: API Management Page & Expanded Endpoints
+
+### 1.1 API Management Page
+
+**Location:** `/settings/api` (new page)
+
+#### Features:
+- View/Create/Delete API keys
+- See usage statistics
+- View rate limits based on plan
+- Copy endpoint examples
+
+#### [NEW] [src/pages/settings/APISettings.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/pages/settings/APISettings.tsx)
+- API key management UI
+- Usage dashboard
+- Documentation links
+
+---
+
+### 1.2 Expanded API Endpoints
+
+All endpoints require `Authorization: Bearer <API_KEY>` header and Business tier.
+
+#### Content Generation
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/tools` | List all tools |
+| `POST` | `/api/v1/generate` | Generate content using any tool |
+
+#### Workflows (User's Account)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/workflows` | List user's workflows |
+| `POST` | `/api/v1/workflows/:id/run` | Execute a workflow |
+
+#### Templates (User's Account)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/templates` | List user's templates |
+| `POST` | `/api/v1/templates/:id/run` | Execute a template |
+
+#### Brand Voices (User's Account)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/brand-voices` | List user's brand voices |
+
+#### Models
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/models` | List available AI models |
+
+### Rate Limits (Based on Subscription)
+
+| Tier | Requests/Minute | Requests/Day |
+|------|-----------------|--------------|
+| Starter | N/A (no API) | N/A |
+| Professional | 50 | 5,000 |
+| Business | 100 | 10,000 |
+| Enterprise | 500 | Unlimited |
+
+---
+
+## Part 2: Outrank SEO Features
+
+### Features from Outrank.so
+1. ✅ Automated keyword research (via SEMrush/Ahrefs API or free alternative)
+2. ✅ 30-day content planning calendar
+3. ✅ SEO-optimized article generation (already have)
+4. ✅ One-click WordPress publishing (via Nango - already integrated)
+5. ✅ AI-generated images (via DALL-E/Stability - already integrated)
+
+### Integration Options for Keyword Research
+
+| Service | Free Tier | API | Recommendation |
+|---------|-----------|-----|----------------|
+| **DataForSEO** | ❌ No free | ✅ Yes | Paid only |
+| **SEMrush** | ❌ No free | ✅ Yes | $99+/month |
+| **Keywords Everywhere** | ⚠️ Limited | ✅ Yes | $10 credits |
+| **Google Search Console** | ✅ Free | ✅ Yes | Your own sites only |
+| **Serper.dev** | ✅ 2,500 free | ✅ Yes | **RECOMMENDED** |
+| **SerpAPI** | ✅ 100 free | ✅ Yes | Good alternative |
+
+**Decision:** Use **Serper.dev** for keyword/SERP data (free tier, no card required).
+
+### Files to Create
+
+#### [NEW] [server/lib/serper.js](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/lib/serper.js)
+- Serper.dev API integration
+- Keyword research endpoint
+- SERP analysis
+
+#### [NEW] [src/pages/content-planner/ContentPlanner.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/pages/content-planner/ContentPlanner.tsx)
+- 30-day content calendar
+- Keyword suggestions
+- Schedule posts
+
+---
+
+## Part 3: Natural Write Mode (Humanizer)
+
+### Concept
+Add a toggle in the top navigation bar:
+- **AI Write** (default) - Normal AI generation
+- **Natural Write** - Passes through humanizer API (costs more credits)
+
+### UI Location
+Below top nav, alongside:
+- Model selector (existing)
+- Brand voice selector (existing)
+- **NEW:** Natural Write toggle
+
+### Integration Options for Humanizer API
+
+| Service | Free Tier | API | No Card | Recommendation |
+|---------|-----------|-----|---------|----------------|
+| **Undetectable.ai** | 250 words | ✅ | ✅ | **RECOMMENDED** |
+| **HumanizeAI.pro** | Unlimited | ❌ No API | ✅ | Web only |
+| **HIX Bypass** | Trial | ✅ | ❌ | $4.99/mo |
+| **TextPolish** | 1000 words/mo | ✅ | ✅ | Good alternative |
+
+**Decision:** Use **Undetectable.ai** (has API, 250 free words to test, no card for trial).
+
+### Credit Cost
+- **AI Write:** 1 credit per generation
+- **Natural Write:** 2 credits per generation (1 for AI + 1 for humanizer pass)
+
+### Files to Create
+
+#### [NEW] [server/lib/humanizer.js](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/lib/humanizer.js)
+- Undetectable.ai API integration
+- Humanize text endpoint
+
+#### [MODIFY] Top Navigation
+- Add Natural Write toggle alongside model selector
+
+#### [MODIFY] Generation Flow
+- If Natural Write enabled, pass output through humanizer before returning
+
+---
+
+## Environment Variables Needed
+
+```env
+# For Humanizer (Part 3)
+UNDETECTABLE_API_KEY=xxx  # Get from undetectable.ai
+
+# For SEO/Keywords (Part 2)
+SERPER_API_KEY=xxx  # Get from serper.dev (free)
+```
+
+---
+
+## CRM Auth Configs Updated ✅
+
+Already added to [server/lib/composio.js](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/lib/composio.js):
+- HubSpot: `ac_7aK5vrpXII8p`
+- Salesforce: `ac_yfV3bj6Hvdaz`
+- Pipedrive: `ac_0i14GD9BWczp`
+
+---
+
+## Implementation Order
+
+### Phase 1: API Expansion (This Session)
+1. [ ] Create API Settings page
+2. [ ] Add `/api/v1/workflows` endpoints
+3. [ ] Add `/api/v1/templates` endpoints
+4. [ ] Add `/api/v1/brand-voices` endpoint
+5. [ ] Add `/api/v1/models` endpoint
+
+### Phase 2: Natural Write Mode
+1. [ ] Integrate Undetectable.ai API
+2. [ ] Add toggle to top nav
+3. [ ] Modify generation flow
+4. [ ] Update credit deduction
+
+### Phase 3: Outrank SEO
+1. [ ] Integrate Serper.dev for keyword research
+2. [ ] Create Content Planner page
+3. [ ] Add keyword research to blog tools
+
+---
+
+## Questions for You
+
+> [!IMPORTANT]
+> Before I start coding, please confirm:
+
+1. **API Endpoints:** Should Professional tier also have API access (at lower limits), or Business only?
+
+2. **Humanizer:** Should I proceed with Undetectable.ai? (250 free words, then paid)
+
+3. **SEO Keywords:** Should I use Serper.dev (free 2,500 queries) or prefer another service?

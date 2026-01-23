@@ -7,9 +7,17 @@ import { Button } from "@/components/ui/button-brutal";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Loader2, Save, ArrowLeft, Upload } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Loader2, Save, ArrowLeft, Upload, Plug } from "lucide-react";
 import { toast } from "sonner";
 import { TagSelector } from "@/components/TagSelector";
+import { AVAILABLE_MODELS } from "@/context/ModelContext";
 
 export default function AgentBuilder() {
   const { id } = useParams();
@@ -19,6 +27,7 @@ export default function AgentBuilder() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
+  const [agentModelId, setAgentModelId] = useState("google/gemini-2.0-flash-001");
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
   const [availableFiles, setAvailableFiles] = useState<any[]>([]);
   const [saving, setSaving] = useState(false);
@@ -46,6 +55,7 @@ export default function AgentBuilder() {
       setName(data.name);
       setDescription(data.description || "");
       setInstructions(data.instructions);
+      if (data.model_config?.modelId) setAgentModelId(data.model_config.modelId);
       setSelectedFiles(data.knowledge_file_ids || []);
     }
   };
@@ -91,6 +101,7 @@ export default function AgentBuilder() {
       name,
       description,
       instructions,
+      model_config: { modelId: agentModelId },
       knowledge_file_ids: selectedFiles, // Save selected files
       created_by: user?.id, // Important for RLS
       updated_at: new Date().toISOString()
@@ -136,6 +147,22 @@ export default function AgentBuilder() {
                 <div>
                     <Label>Description</Label>
                     <Input value={description} onChange={e => setDescription(e.target.value)} className="input-brutal" placeholder="Short description of what this agent does"/>
+                </div>
+
+                <div>
+                    <Label>Base Model</Label>
+                    <Select value={agentModelId} onValueChange={setAgentModelId}>
+                        <SelectTrigger className="input-brutal bg-white">
+                            <SelectValue placeholder="Select Model" />
+                        </SelectTrigger>
+                        <SelectContent>
+                            {AVAILABLE_MODELS.map(m => (
+                                <SelectItem key={m.id} value={m.id}>
+                                    {m.name}
+                                </SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
                 </div>
                 
                 {id && currentTeam && (
@@ -217,6 +244,25 @@ export default function AgentBuilder() {
                     {saving ? <Loader2 className="animate-spin mr-2"/> : <Save className="mr-2"/>}
                     Save Agent
                 </Button>
+
+                {/* Integrations Section */}
+                {id && (
+                    <div className="mt-8 pt-8 border-t-4 border-black">
+                        <div className="flex items-center gap-2 mb-4">
+                            <Plug className="h-5 w-5" />
+                            <h2 className="text-xl font-bold">Integrations</h2>
+                        </div>
+                        <p className="text-sm text-muted-foreground mb-4">
+                            Integrations are coming soon.
+                        </p>
+                        <div className="border-2 border-dashed border-gray-300 bg-slate-50 p-6 text-center">
+                            <h3 className="text-lg font-bold mb-2">Coming Soon</h3>
+                            <p className="text-sm text-muted-foreground">
+                                You’ll be able to connect apps like Gmail, Slack, HubSpot, and more.
+                            </p>
+                        </div>
+                    </div>
+                )}
             </div>
         </div>
       </div>

@@ -7,7 +7,10 @@ import { Button } from "@/components/ui/button-brutal";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles, Lock } from "lucide-react";
+import { useModel } from "@/context/ModelContext";
+import { useBrandVoice } from "@/context/BrandVoiceContext";
+import { usePermissions } from "@/hooks/usePermissions";
 
 /**
  * Resume Bullet Point Generator Tool
@@ -38,6 +41,9 @@ interface Result {
 }
 
 const ResumeTool = () => {
+  const { canGenerate, isViewer } = usePermissions();
+  const { selectedModelId } = useModel();
+  const { selectedVoiceId } = useBrandVoice();
   const [formData, setFormData] = useState({
     jobTitle: "",
     achievements: "",
@@ -47,6 +53,10 @@ const ResumeTool = () => {
   const [isLoading, setIsLoading] = useState(false);
 
   const handleGenerate = async () => {
+    if (!canGenerate) {
+      alert('Viewers cannot generate content');
+      return;
+    }
     if (!formData.jobTitle.trim() || !formData.achievements.trim()) {
       alert("Please fill in job title and achievements");
       return;
@@ -61,6 +71,8 @@ const ResumeTool = () => {
         tool: "resume",
         inputs: formData,
         outputCount: 5,
+        modelId: selectedModelId,
+        brandVoiceId: selectedVoiceId,
       });
       const arr = (data?.results ?? []) as Result[];
       console.debug("results.count", Array.isArray(arr) ? arr.length : 0);
@@ -139,10 +151,18 @@ const ResumeTool = () => {
                   />
                 </div>
 
+                {isViewer && (
+                  <div className="mb-4 p-3 bg-yellow-50 border-2 border-yellow-400 rounded flex items-start gap-2">
+                    <Lock className="w-4 h-4 text-yellow-600 mt-0.5" />
+                    <p className="text-sm text-yellow-700"><strong>Viewer:</strong> You cannot generate content</p>
+                  </div>
+                )}
+
                 <Button
                   onClick={handleGenerate}
-                  disabled={isLoading || !formData.jobTitle.trim() || !formData.achievements.trim()}
-                  className="w-full bg-black text-white"
+                  disabled={isLoading || !formData.jobTitle.trim() || !formData.achievements.trim() || isViewer}
+                  className={`w-full bg-black text-white ${isViewer ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  title={isViewer ? 'Viewers cannot generate content' : ''}
                   size="lg"
                 >
                   {isLoading ? (

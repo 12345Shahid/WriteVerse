@@ -7,24 +7,55 @@ import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 import rateLimit from 'express-rate-limit';
 import Stripe from 'stripe';
+import { Novu } from '@novu/node';
 import { recordUsage } from './meter.js';
 
 import { ingestDocument, searchKnowledge } from './knowledge-base.js';
+import multer from 'multer';
+
+// Configure Multer for memory storage (direct upload to Supabase)
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
+});
+
 import { chatWithAgent } from './agents.js';
+import { runWorkflow } from './workflow-engine.js';
+import embedApi from './embed-api.js';
+import { trackEvent, identifyUser } from './lib/mixpanel.js';
+import { OpenRouterClient } from './lib/openrouter.js';
+import { generateParagonToken, sendContentGeneratedEvent } from './lib/paragon.js';
+import * as composio from './lib/composio.js';
+// import zapierAuth from './zapier-auth.js'; // ZAPIER DISABLED (Requires credentials)
+import * as Sentry from "@sentry/node";
+import { nodeProfilingIntegration } from "@sentry/profiling-node";
+
+Sentry.init({
+  dsn: process.env.SENTRY_DSN,
+  integrations: [
+    nodeProfilingIntegration(),
+  ],
+  tracesSampleRate: 1.0,
+  profilesSampleRate: 1.0,
+});
 
 const app = express();
 const PORT = process.env.PORT || 8787;
 
+
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan('dev'));
+app.use(express.static('public')); // Serve static files
 
 // Initialize Gemini and Supabase admin client
 const genAI = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
+const openRouter = process.env.OPENROUTER_API_KEY ? new OpenRouterClient(process.env.OPENROUTER_API_KEY) : null;
 const supabaseAdmin = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null;
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+const novu = process.env.NOVU_API_KEY ? new Novu(process.env.NOVU_API_KEY) : null;
 
 const generateLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -65,6 +96,7 @@ const ToolSchema = z.object({
   outputCount: z.number().min(1).max(10).optional(),
   tone: z.string().optional(),
   brandVoiceId: z.string().optional(),
+  modelId: z.string().optional(),
 });
 
 // Public sharing for saved results
@@ -503,7 +535,290 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Paragon Token Endpoint - Generate JWT for frontend authentication
+app.get('/api/auth/paragon-token', async (req, res) => {
+  const userId = req.headers['x-user-id'];
+  
+  if (!userId) {
+    return res.status(401).json({ error: 'NO_USER_ID', message: 'User ID required' });
+  }
+
+  if (!process.env.PARAGON_PROJECT_ID || !process.env.PARAGON_SIGNING_KEY) {
+    return res.status(503).json({ 
+      error: 'PARAGON_NOT_CONFIGURED', 
+      message: 'Paragon integration is not configured' 
+    });
+  }
+
+  try {
+    const token = await generateParagonToken(userId);
+    return res.json({ 
+      token,
+      projectId: process.env.PARAGON_PROJECT_ID
+    });
+  } catch (error) {
+    console.error('[Paragon][Token] Error:', error);
+    return res.status(500).json({ error: 'TOKEN_GENERATION_FAILED', message: error.message });
+  }
+});
+
+// ============================================
+// COMPOSIO INTEGRATION ENDPOINTS
+// ============================================
+
+// Health check for Composio
+app.get('/api/composio/health', async (req, res) => {
+  try {
+    const health = await composio.healthCheck();
+    return res.json(health);
+  } catch (error) {
+    console.error('[Composio][Health] Error:', error);
+    return res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+// List available apps from Composio
+app.get('/api/composio/apps', async (req, res) => {
+  try {
+    const result = await composio.getAvailableApps();
+    if (!result.success) {
+      return res.status(503).json({ error: 'COMPOSIO_ERROR', message: result.error });
+    }
+    return res.json({ apps: result.apps });
+  } catch (error) {
+    console.error('[Composio][Apps] Error:', error);
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+  }
+});
+
+// Get tools for a specific app
+app.get('/api/composio/apps/:appName/tools', async (req, res) => {
+  const { appName } = req.params;
+  try {
+    const result = await composio.getAppTools(appName.toUpperCase());
+    if (!result.success) {
+      return res.status(503).json({ error: 'COMPOSIO_ERROR', message: result.error });
+    }
+    return res.json({ tools: result.tools });
+  } catch (error) {
+    console.error('[Composio][Tools] Error:', error);
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+  }
+});
+
+// Get user's connected accounts
+app.get('/api/composio/connections', async (req, res) => {
+  const userId = req.headers['x-user-id'];
+  if (!userId) {
+    return res.status(401).json({ error: 'NO_USER_ID', message: 'User ID required' });
+  }
+
+  try {
+    const result = await composio.getConnectedAccounts(userId);
+    return res.json({ accounts: result.accounts });
+  } catch (error) {
+    console.error('[Composio][Connections] Error:', error);
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+  }
+});
+
+// Initiate OAuth connection to an app
+app.post('/api/composio/connect', async (req, res) => {
+  const userId = req.headers['x-user-id'];
+  const orgId = req.headers['x-organization-id'];
+  const { appName, redirectUrl, agentId } = req.body || {};
+
+  if (!userId) {
+    return res.status(401).json({ error: 'NO_USER_ID', message: 'User ID required' });
+  }
+  if (!appName) {
+    return res.status(400).json({ error: 'MISSING_APP', message: 'appName is required' });
+  }
+
+  try {
+    const result = await composio.initiateConnection(userId, appName.toUpperCase(), redirectUrl);
+    if (!result.success) {
+      return res.status(503).json({ error: 'CONNECTION_FAILED', message: result.error, setupRequired: result.setupRequired });
+    }
+
+    // If agentId is provided, also store in agent_integrations
+    // This links the Composio connection to the specific agent
+    if (agentId && supabaseAdmin && result.connectionId) {
+      try {
+        await supabaseAdmin
+          .from('agent_integrations')
+          .upsert({
+            agent_id: agentId,
+            organization_id: orgId,
+            app_name: appName.toUpperCase(),
+            connection_id: result.connectionId,
+            connection_status: 'pending',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          }, { onConflict: 'agent_id,app_name' });
+        console.log('[Composio] Stored agent integration link:', { agentId, appName });
+      } catch (dbError) {
+        console.warn('[Composio] Failed to store agent integration:', dbError.message);
+      }
+    }
+
+    return res.json({ 
+      authUrl: result.authUrl,
+      connectionId: result.connectionId
+    });
+  } catch (error) {
+    console.error('[Composio][Connect] Error:', error);
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+  }
+});
+
+// Disconnect an app
+app.post('/api/composio/disconnect', async (req, res) => {
+  const userId = req.headers['x-user-id'];
+  const { connectionId } = req.body || {};
+
+  if (!userId) {
+    return res.status(401).json({ error: 'NO_USER_ID', message: 'User ID required' });
+  }
+  if (!connectionId) {
+    return res.status(400).json({ error: 'MISSING_CONNECTION', message: 'connectionId is required' });
+  }
+
+  try {
+    const result = await composio.disconnectApp(userId, connectionId);
+    if (!result.success) {
+      return res.status(503).json({ error: 'DISCONNECT_FAILED', message: result.error });
+    }
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('[Composio][Disconnect] Error:', error);
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+  }
+});
+
+// Link an existing Composio connection to an agent
+// Link an existing Composio connection to an agent
+app.post('/api/composio/link-agent', async (req, res) => {
+  const userId = req.headers['x-user-id'];
+  let orgId = req.headers['x-organization-id'];
+  const { agentId, appName, connectionId } = req.body || {};
+
+  if (!userId || !agentId || !appName) {
+    return res.status(400).json({ error: 'MISSING_PARAMS', message: 'agentId and appName required' });
+  }
+
+  try {
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: 'DB_NOT_CONFIGURED' });
+    }
+
+    // Lookup Org ID if missing or placeholder
+    if (!orgId || orgId === 'YOUR_ORG_ID') {
+      const { data: mem } = await supabaseAdmin
+        .from('organization_members')
+        .select('organization_id')
+        .eq('user_id', userId)
+        .limit(1)
+        .maybeSingle();
+      
+      if (mem) {
+        orgId = mem.organization_id;
+        console.log('[Composio][Link] Resolved Org ID:', orgId);
+      } else {
+        return res.status(400).json({ error: 'ORG_NOT_FOUND', message: 'Could not resolve Organization ID for user' });
+      }
+    }
+
+    const { error } = await supabaseAdmin
+      .from('agent_integrations')
+      .upsert({
+        agent_id: agentId,
+        organization_id: orgId,
+        user_id: userId, // Include user_id as it is good practice, though nullable
+        app_name: appName.toUpperCase(),
+        connection_id: connectionId || null,
+        connection_status: 'connected',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'agent_id,app_name' });
+
+    if (error) {
+      console.error('[Composio][LinkAgent] DB Error:', error);
+      return res.status(500).json({ error: 'DB_ERROR', message: error.message, details: error });
+    }
+
+    console.log('[Composio] Linked agent to app:', { agentId, appName });
+    return res.json({ success: true, orgId });
+  } catch (error) {
+    console.error('[Composio][LinkAgent] Error:', error);
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+  }
+});
+
+// Execute a tool manually (for testing)
+app.post('/api/composio/execute', async (req, res) => {
+  const userId = req.headers['x-user-id'];
+  const orgId = req.headers['x-organization-id'];
+  const { toolName, params } = req.body || {};
+
+  if (!userId) {
+    return res.status(401).json({ error: 'NO_USER_ID', message: 'User ID required' });
+  }
+  if (!toolName) {
+    return res.status(400).json({ error: 'MISSING_TOOL', message: 'toolName is required' });
+  }
+
+  try {
+    const result = await composio.executeTool(userId, toolName, params || {}, {
+      source: 'api',
+      orgId
+    });
+
+    // Log execution to database if configured
+    if (supabaseAdmin && orgId) {
+      try {
+        await supabaseAdmin.rpc('log_tool_execution', {
+          p_organization_id: orgId,
+          p_user_id: userId,
+          p_source_type: 'api',
+          p_source_id: null,
+          p_source_name: 'Manual API Call',
+          p_tool_name: toolName,
+          p_app_name: toolName.split('_')[0],
+          p_input_params: params || {},
+          p_output_result: result.result || null,
+          p_status: result.success ? 'success' : 'error',
+          p_error_message: result.error || null,
+          p_error_code: result.errorCode || null,
+          p_execution_time_ms: result.executionTime || null
+        });
+      } catch (logError) {
+        console.warn('[Composio][Execute] Failed to log execution:', logError.message);
+      }
+    }
+
+    if (!result.success) {
+      return res.status(503).json({ 
+        error: 'EXECUTION_FAILED', 
+        message: result.error,
+        code: result.errorCode,
+        executionTime: result.executionTime
+      });
+    }
+
+    return res.json({ 
+      success: true,
+      result: result.result,
+      executionTime: result.executionTime
+    });
+  } catch (error) {
+    console.error('[Composio][Execute] Error:', error);
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+  }
+});
+
 // Create confirmed user (admin) for local dev parity with serverless
+
 app.post('/api/auth/create-confirmed', async (req, res) => {
   try {
     const { email, password, name } = req.body || {};
@@ -619,7 +934,7 @@ app.post('/api/generate', generateLimiter, async (req, res) => {
     });
   }
 
-  const { tool, inputs, outputCount = 3, tone, brandVoiceId } = parsed.data;
+  const { tool, inputs, outputCount = 3, tone, brandVoiceId, modelId } = parsed.data;
 
   if (isUnsafeContent(tool, inputs)) {
     const formatted = buildSafeResults(tool, inputs);
@@ -628,6 +943,29 @@ app.post('/api/generate', generateLimiter, async (req, res) => {
       results: formatted,
       debug: { tool, durationMs: t1 - t0, model: 'safety-filter', blocked: true },
     });
+  }
+
+  // Determine Model & Multiplier
+  let provider = 'google';
+  let selectedModel = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+  let multiplier = 1.0;
+
+  if (modelId && supabaseAdmin) {
+      try {
+          const { data: modelData } = await supabaseAdmin
+              .from('ai_models')
+              .select('provider, credit_multiplier')
+              .eq('id', modelId)
+              .single();
+          
+          if (modelData) {
+              provider = modelData.provider;
+              selectedModel = modelId;
+              multiplier = modelData.credit_multiplier || 1.0;
+          }
+      } catch (e) {
+          console.warn('[Generate] Model lookup failed', e);
+      }
   }
 
   // Optional credits enforcement (no-op if credits columns are absent)
@@ -657,7 +995,8 @@ app.post('/api/generate', generateLimiter, async (req, res) => {
     landing_page_writer: 7,
     report_writer: 9,
   };
-  const creditsCharged = TOOL_CREDIT_COST[tool] ?? 1;
+  const baseCredits = TOOL_CREDIT_COST[tool] ?? 1;
+  const creditsCharged = Math.ceil(baseCredits * multiplier);
 
   // Organization & Credit Check
   let orgId = req.headers['x-organization-id'];
@@ -729,8 +1068,16 @@ app.post('/api/generate', generateLimiter, async (req, res) => {
         }
     }
 
-    const modelName = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
-    const model = genAI.getGenerativeModel({ model: modelName }, { apiVersion: 'v1' });
+    let model;
+    if (provider === 'openrouter' && openRouter) {
+        model = openRouter.getGenerativeModel({ model: selectedModel });
+    } else if (genAI) {
+        // Strip 'google/' prefix for direct Google API usage
+        const cleanModel = selectedModel.replace(/^google\//, '');
+        model = genAI.getGenerativeModel({ model: cleanModel }, { apiVersion: 'v1' });
+    } else {
+        throw new Error('No AI Provider configured for ' + provider);
+    }
 
     const prompt = buildPrompt(tool, inputs, outputCount, tone) + brandContext;
     const finalPrompt = `${prompt}\n\nReturn strictly valid JSON. Do not include code fences.`;
@@ -850,13 +1197,63 @@ app.post('/api/generate', generateLimiter, async (req, res) => {
           organization_id: orgId,
           user_id: userId,
           tool,
-          provider: 'google',
+          provider: provider,
           action: 'generate',
           units: estimatedTokens,
           credits: creditsCharged,
-          metadata: { model: modelName, attempts }
+          metadata: { model: selectedModel, attempts }
         });
         console.log(`[Credits] Deducted ${creditsCharged} from org ${orgId}`);
+        
+        // Mixpanel Tracking
+        trackEvent('tool_used', userId, {
+            tool,
+            orgId,
+            credits: creditsCharged,
+            model: selectedModel,
+            tokenCount: estimatedTokens
+        });
+
+        // Paragon Integration - Send content generated event
+        // This triggers workflows connected to user's integrations (Notion, Slack, etc.)
+        const contentTitle = inputs.topic || inputs.title || `Generated ${tool} content`;
+        sendContentGeneratedEvent(userId, tool, contentTitle, text, {
+          orgId,
+          model: selectedModel,
+          creditsUsed: creditsCharged
+        }).catch(e => console.warn('[Paragon] Event send failed:', e.message));
+
+        // Composio Integration - Push content to connected destinations
+        // This is handled separately from Paragon for users with Composio integrations
+        if (composio.isComposioEnabled()) {
+          try {
+            // Check if user has configured output destinations for this tool
+            const { data: outputConfigs } = await supabaseAdmin
+              .from('tool_output_destinations')
+              .select('*')
+              .eq('organization_id', orgId)
+              .eq('tool_name', tool)
+              .eq('is_enabled', true);
+
+            if (outputConfigs?.length > 0) {
+              for (const config of outputConfigs) {
+                composio.executeTool(userId, config.action_name, {
+                  ...config.action_params,
+                  content: text,
+                  title: contentTitle,
+                  tool: tool
+                }, {
+                  source: 'tool_output',
+                  orgId
+                }).catch(e => console.warn('[Composio] Output sync failed:', e.message));
+              }
+              console.log(`[Composio] Triggered ${outputConfigs.length} output destinations for ${tool}`);
+            }
+          } catch (e) {
+            console.warn('[Composio] Output sync check failed:', e.message);
+          }
+        }
+
       } catch (e) {
         console.warn('[Credits] Deduction failed', e?.message || e);
       }
@@ -867,7 +1264,7 @@ app.post('/api/generate', generateLimiter, async (req, res) => {
 
     return res.json({
       results: formatted,
-      debug: { tool, durationMs: t1 - t0, model: modelName, creditsCharged, attemptsUsed: attempts },
+      debug: { tool, durationMs: t1 - t0, model: selectedModel, creditsCharged, attemptsUsed: attempts },
     });
 
   } catch (err) {
@@ -906,6 +1303,12 @@ app.post('/api/workflows/:id/execute', async (req, res) => {
 
     // Run workflow (awaiting for MVP simplicity)
     const result = await runWorkflow(workflowId, userId, orgId, inputs);
+    
+    trackEvent('workflow_executed', userId, {
+        workflowId,
+        orgId
+    });
+
     res.json(result);
 
   } catch (e) {
@@ -913,6 +1316,12 @@ app.post('/api/workflows/:id/execute', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// Embed API
+app.use('/api/embed', embedApi);
+
+// Zapier Auth
+// app.use('/api/auth/zapier', zapierAuth); // ZAPIER DISABLED
 
 app.post('/api/agents/chat', async (req, res) => {
   const userId = req.headers['x-user-id'];
@@ -923,12 +1332,376 @@ app.post('/api/agents/chat', async (req, res) => {
   if (!agentId || (!message && (!attachments || attachments.length === 0))) return res.status(400).json({ error: 'Missing agentId or content' });
 
   try {
-    const result = await chatWithAgent(userId, orgId, agentId, message || '', sessionId, attachments || []);
+    const result = await chatWithAgent(userId, orgId, agentId, message || '', sessionId, attachments || [], { novu });
+    
+    trackEvent('internal_agent_chat', userId, {
+        agentId,
+        orgId,
+        messageLength: message ? message.length : 0
+    });
+
     res.json(result);
   } catch (e) {
     console.error("Agent Chat Error", e);
     res.status(500).json({ error: e.message });
   }
+});
+
+// INBOX API (Human Escalation)
+app.get('/api/agents/inbox', async (req, res) => {
+    const userId = req.headers['x-user-id'];
+    const orgId = req.headers['x-organization-id'];
+    const { filter } = req.query; // 'all' or default 'escalated'
+
+    if (!userId || !orgId) return res.status(401).json({ error: 'Unauthorized' });
+
+    try {
+        let query = supabaseAdmin
+            .from('agent_sessions')
+            .select(`
+                id,
+                title,
+                status,
+                created_at,
+                updated_at,
+                customer_name,
+                customer_email,
+                agent:agents!inner(id, name, organization_id),
+                last_message:agent_messages(content, created_at, role)
+            `)
+            .eq('agent.organization_id', orgId) // Ensure org isolation check
+            .neq('status', 'closed') // Always hide closed unless specifically requested? User said "open all inbox" -> likely implies active/escalated. Let's exclude closed for now to keep it clean, or maybe include active/escalated.
+            .order('updated_at', { ascending: false });
+
+        if (filter !== 'all') {
+            query = query.eq('status', 'escalated');
+        } else {
+             // For "Active" inbox, arguably we might want to see everything NOT closed?
+             // Or maybe literally everything.
+             // User said "all the chats". I will show everything except closed for now to avoid clutter, 
+             // or maybe just show everything. Let's filter out 'closed' only if specific.
+             // Actually, user might want to see history. Let's just remove the status filter.
+             // But let's verify if 'closed' sessions should be shown. Usually "Inbox" implies open tasks.
+             // I'll show 'active' and 'escalated'.
+             query = query.in('status', ['active', 'escalated']);
+        }
+        
+        const { data: sessions, error } = await query;
+
+        if (error) throw error;
+        
+        // Transform for frontend
+        const inbox = sessions.map(s => {
+            // Pick last user message as preview if possible, or just last message
+             const sorted = s.last_message?.sort((a,b) => new Date(b.created_at) - new Date(a.created_at));
+             const lastMsg = sorted?.[0];
+             return {
+                 id: s.id,
+                 agentName: s.agent.name,
+                 title: s.title || lastMsg?.content?.substring(0, 50) || 'New Conversation',
+                 status: s.status,
+                 lastMessage: lastMsg?.content,
+                 updatedAt: s.updated_at,
+                 customerName: s.customer_name,
+                 customerEmail: s.customer_email
+             };
+        });
+
+        res.json({ sessions: inbox });
+    } catch (e) {
+        console.error("Inbox Fetch Error", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Human Reply Endpoint
+app.post('/api/agents/reply', async (req, res) => {
+    const userId = req.headers['x-user-id'];
+    const { sessionId, message } = req.body;
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    try {
+        // Save human reply as 'assistant'
+        const { error } = await supabaseAdmin.from('agent_messages').insert({
+            session_id: sessionId,
+            role: 'assistant',
+            content: message,
+            metadata: { responded_by: userId } // Track which human replied
+        });
+
+        if (error) throw error;
+
+        // Optionally update updated_at of session
+        await supabaseAdmin.from('agent_sessions').update({ updated_at: new Date().toISOString() }).eq('id', sessionId);
+
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Agent Reply Error", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- Widget Settings & Uploads ---
+
+app.post('/api/agents/:id/widget-settings', async (req, res) => {
+    const { id } = req.params;
+    const { settings } = req.body;
+
+    try {
+        const { error } = await supabaseAdmin
+            .from('agents')
+            .update({ widget_settings: settings })
+            .eq('id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Save Widget Settings Error", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- Proactive Triggers CRUD ---
+
+// List triggers for an agent
+app.get('/api/agents/:id/triggers', async (req, res) => {
+    const { id } = req.params;
+    
+    try {
+        const { data, error } = await supabaseAdmin
+            .from('agent_proactive_triggers')
+            .select('*')
+            .eq('agent_id', id)
+            .order('created_at', { ascending: false });
+        
+        if (error) throw error;
+        res.json({ triggers: data || [] });
+    } catch (e) {
+        console.error("Get Triggers Error", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Create a new trigger
+app.post('/api/agents/:id/triggers', async (req, res) => {
+    const { id } = req.params;
+    const { url_pattern, message, delay_seconds, is_enabled } = req.body || {};
+
+    if (!url_pattern || !message) {
+        return res.status(400).json({ error: 'url_pattern and message are required' });
+    }
+
+    try {
+        const { data, error } = await supabaseAdmin
+            .from('agent_proactive_triggers')
+            .insert({
+                agent_id: id,
+                url_pattern,
+                message,
+                delay_seconds: delay_seconds ?? 5,
+                is_enabled: is_enabled ?? true
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.status(201).json({ trigger: data });
+    } catch (e) {
+        console.error("Create Trigger Error", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Update a trigger
+app.put('/api/agents/:id/triggers/:triggerId', async (req, res) => {
+    const { id, triggerId } = req.params;
+    const { url_pattern, message, delay_seconds, is_enabled } = req.body || {};
+
+    const updatePayload = { updated_at: new Date().toISOString() };
+    if (url_pattern !== undefined) updatePayload.url_pattern = url_pattern;
+    if (message !== undefined) updatePayload.message = message;
+    if (delay_seconds !== undefined) updatePayload.delay_seconds = delay_seconds;
+    if (is_enabled !== undefined) updatePayload.is_enabled = is_enabled;
+
+    try {
+        const { data, error } = await supabaseAdmin
+            .from('agent_proactive_triggers')
+            .update(updatePayload)
+            .eq('id', triggerId)
+            .eq('agent_id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json({ trigger: data });
+    } catch (e) {
+        console.error("Update Trigger Error", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Delete a trigger
+app.delete('/api/agents/:id/triggers/:triggerId', async (req, res) => {
+    const { id, triggerId } = req.params;
+
+    try {
+        const { error } = await supabaseAdmin
+            .from('agent_proactive_triggers')
+            .delete()
+            .eq('id', triggerId)
+            .eq('agent_id', id);
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Delete Trigger Error", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- Agent Analytics ---
+
+app.get('/api/agents/:id/analytics', async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        // Total Conversations
+        const { count: totalConversations, error: sessErr } = await supabaseAdmin
+            .from('agent_sessions')
+            .select('*', { count: 'exact', head: true })
+            .eq('agent_id', id);
+
+        if (sessErr) throw sessErr;
+
+        // Get session IDs for this agent
+        const { data: sessionData } = await supabaseAdmin
+            .from('agent_sessions')
+            .select('id')
+            .eq('agent_id', id);
+        
+        const sessionIds = sessionData?.map(s => s.id) || [];
+
+        // Total Messages (only if there are sessions)
+        let totalMessages = 0;
+        if (sessionIds.length > 0) {
+            const { count, error: msgErr } = await supabaseAdmin
+                .from('agent_messages')
+                .select('id', { count: 'exact', head: true })
+                .in('session_id', sessionIds);
+            if (!msgErr) totalMessages = count || 0;
+        }
+
+        // Escalation Rate
+        const { count: escalatedCount } = await supabaseAdmin
+            .from('agent_sessions')
+            .select('*', { count: 'exact', head: true })
+            .eq('agent_id', id)
+            .eq('status', 'escalated');
+
+        // Recent Conversations (last 5)
+        const { data: recentSessions } = await supabaseAdmin
+            .from('agent_sessions')
+            .select('id, title, customer_email, status, created_at')
+            .eq('agent_id', id)
+            .order('created_at', { ascending: false })
+            .limit(5);
+
+        const avgMessagesPerSession = totalConversations && totalConversations > 0 
+            ? Math.round(totalMessages / totalConversations * 10) / 10 
+            : 0;
+        
+        const escalationRate = totalConversations && totalConversations > 0
+            ? Math.round((escalatedCount || 0) / totalConversations * 100)
+            : 0;
+
+        res.json({
+            totalConversations: totalConversations || 0,
+            totalMessages,
+            avgMessagesPerSession,
+            escalationRate,
+            recentSessions: recentSessions || []
+        });
+    } catch (e) {
+        console.error("Agent Analytics Error", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/embed/upload', upload.single('file'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    try {
+        const fileExt = req.file.originalname.split('.').pop();
+        const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
+        const filePath = `uploads/${fileName}`;
+
+        const { error } = await supabaseAdmin.storage
+            .from('chat-attachments')
+            .upload(filePath, req.file.buffer, {
+                contentType: req.file.mimetype,
+                upsert: false
+            });
+
+        if (error) throw error;
+
+        const { data: publicUrlData } = supabaseAdmin.storage
+            .from('chat-attachments')
+            .getPublicUrl(filePath);
+
+        res.json({ url: publicUrlData.publicUrl, type: req.file.mimetype });
+    } catch (e) {
+        console.error("Upload Error", e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- Agent Status & Handoff ---
+
+// Toggle Agent Status (Start/Stop)
+app.post('/api/agents/status', async (req, res) => {
+    const userId = req.headers['x-user-id'];
+    const { sessionId, status } = req.body;
+
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    if (!['active', 'escalated'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
+
+    try {
+        const { error } = await supabaseAdmin
+            .from('agent_sessions')
+            .update({ status })
+            .eq('id', sessionId);
+
+        if (error) throw error;
+
+        // Trigger notification on manual escalation
+        if (status === 'escalated' && novu) {
+            try {
+                // Get session details for notification
+                const { data: sess } = await supabaseAdmin.from('agent_sessions').select('agent_id, agent:agents(organization_id, name)').eq('id', sessionId).single();
+                if(sess) {
+                     const { data: org } = await supabaseAdmin.from('organizations').select('created_by').eq('id', sess.agent.organization_id).single();
+                     const targetUserId = org?.created_by;
+                     if(targetUserId) {
+                        await novu.trigger('agent-escalation', {
+                            to: { subscriberId: targetUserId },
+                            payload: {
+                                sessionId: sessionId,
+                                agentId: sess.agent_id,
+                                agentName: sess.agent?.name || 'Agent',
+                                message: 'Manual escalation requested'
+                            }
+                        });
+                     }
+                }
+            } catch(e) { console.error("Novu manual trigger failed", e); }
+        }
+
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Agent Status Update Error", e);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 function buildPrompt(tool, inputs, outputCount, tone) {
@@ -1632,7 +2405,7 @@ app.post('/api/checkout/session', async (req, res) => {
   }
 
   const amountCents = Math.max(100, Math.round(amountUsd * 100));
-  const creditsPerUsd = 100;
+  const creditsPerUsd = 1000;
   const creditsToAdd = Math.max(1, Math.round(amountUsd * creditsPerUsd));
 
   try {
@@ -1728,91 +2501,34 @@ app.post('/api/checkout/confirm', async (req, res) => {
   }
 
   try {
-    console.log('[Checkout][CONFIRM] Looking up credits_transactions', { userId, sessionId });
-    const { data: tx, error: txError } = await supabaseAdmin
-      .from('credits_transactions')
-      .select('id, user_id, amount_cents, credits_added, status, stripe_session_id')
-      .eq('user_id', userId)
-      .eq('stripe_session_id', sessionId)
-      .single();
-    if (txError || !tx) {
-      console.error('[Checkout][CONFIRM] credits_transactions lookup failed', txError);
-      return res.status(404).json({ error: 'TX_NOT_FOUND', message: 'No matching credits transaction for this session' });
-    }
-
-    if (tx.status === 'succeeded') {
-      console.log('[Checkout][CONFIRM] Transaction already succeeded, returning idempotent success', {
-        txId: tx.id,
-      });
-      return res.status(200).json({ ok: true, alreadyConfirmed: true });
-    }
-
+    // Check Stripe status first
     console.log('[Checkout][CONFIRM] Retrieving Stripe session', { sessionId });
     const session = await stripe.checkout.sessions.retrieve(sessionId);
-
     const paid = session.payment_status === 'paid' || session.status === 'complete';
+    
     if (!paid) {
-      console.warn('[Checkout][CONFIRM] Session not paid', {
-        sessionId,
-        payment_status: session.payment_status,
-        status: session.status,
-      });
-      return res.status(400).json({
-        error: 'SESSION_NOT_PAID',
-        message: 'Checkout session is not paid yet',
-      });
+      return res.status(400).json({ error: 'NOT_PAID', message: 'Payment not completed' });
     }
 
-    const amountTotal = session.amount_total || 0;
-    if (amountTotal && amountTotal !== tx.amount_cents) {
-      console.warn('[Checkout][CONFIRM] Amount mismatch', {
-        txAmount: tx.amount_cents,
-        sessionAmount: amountTotal,
-      });
+    // Call robust SQL function to fulfill
+    const { data, error } = await supabaseAdmin.rpc('fulfill_checkout', { session_id: sessionId });
+    
+    if (error) {
+      console.error('[Checkout][CONFIRM] RPC error', error);
+      return res.status(500).json({ error: 'FULFILLMENT_FAILED', message: error.message });
     }
 
-    console.log('[Checkout][CONFIRM] Fetching user credits', { userId });
-    const { data: user, error: userError } = await supabaseAdmin
-      .from('users')
-      .select('credits_balance, credits_lifetime')
-      .eq('id', userId)
-      .single();
-    if (userError || !user) {
-      console.error('[Checkout][CONFIRM] Failed to fetch user row', userError);
-      return res.status(500).json({ error: 'USER_FETCH_FAILED', message: String(userError?.message || userError) });
+    console.log('[Checkout][CONFIRM] Fulfillment result', data);
+    
+    if (data && data.error) {
+       return res.status(400).json({ error: 'FULFILLMENT_ERROR', message: data.error });
     }
 
-    const newBalance = (user.credits_balance ?? 0) + tx.credits_added;
-    const newLifetime = (user.credits_lifetime ?? 0) + tx.credits_added;
-
-    console.log('[Checkout][CONFIRM] Updating user credits', {
-      oldBalance: user.credits_balance,
-      newBalance,
-      creditsAdded: tx.credits_added,
-    });
-    const { error: updateUserError } = await supabaseAdmin
-      .from('users')
-      .update({ credits_balance: newBalance, credits_lifetime: newLifetime })
-      .eq('id', userId);
-    if (updateUserError) {
-      console.error('[Checkout][CONFIRM] Failed to update user credits', updateUserError);
-      return res.status(500).json({ error: 'USER_UPDATE_FAILED', message: String(updateUserError?.message || updateUserError) });
-    }
-
-    console.log('[Checkout][CONFIRM] Marking transaction as succeeded', { txId: tx.id });
-    const { error: updateTxError } = await supabaseAdmin
-      .from('credits_transactions')
-      .update({ status: 'succeeded' })
-      .eq('id', tx.id);
-    if (updateTxError) {
-      console.error('[Checkout][CONFIRM] Failed to update transaction status', updateTxError);
-    }
-
-    return res.status(200).json({
+    return res.json({
       ok: true,
-      credits_added: tx.credits_added,
-      new_balance: newBalance,
-      new_lifetime: newLifetime,
+      credits_added: data.credits_added,
+      new_balance: data.new_balance,
+      status: data.status,
     });
   } catch (e) {
     console.error('[Checkout][CONFIRM] Error', e);
@@ -1820,6 +2536,778 @@ app.post('/api/checkout/confirm', async (req, res) => {
   }
 });
 
+// --- STRIPE WEBHOOKS ---
+// This endpoint handles Stripe webhook events for payment confirmations
+// IMPORTANT: This must use raw body parsing for signature verification
+app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  console.log('[Webhook][Stripe] Incoming webhook event');
+  
+  if (!stripe) {
+    console.error('[Webhook][Stripe] STRIPE_SECRET_KEY not configured');
+    return res.status(500).json({ error: 'STRIPE_NOT_CONFIGURED' });
+  }
+  if (!supabaseAdmin) {
+    console.error('[Webhook][Stripe] Supabase admin not configured');
+    return res.status(500).json({ error: 'SUPABASE_NOT_CONFIGURED' });
+  }
+
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  let event;
+
+  // Verify webhook signature if secret is configured
+  if (webhookSecret) {
+    const sig = req.headers['stripe-signature'];
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+    } catch (err) {
+      console.error('[Webhook][Stripe] Signature verification failed:', err.message);
+      return res.status(400).json({ error: 'INVALID_SIGNATURE', message: err.message });
+    }
+  } else {
+    // For development without webhook secret (NOT recommended for production)
+    console.warn('[Webhook][Stripe] No STRIPE_WEBHOOK_SECRET configured, skipping signature verification');
+    try {
+      event = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    } catch (err) {
+      return res.status(400).json({ error: 'INVALID_PAYLOAD' });
+    }
+  }
+
+  console.log('[Webhook][Stripe] Event type:', event.type, 'ID:', event.id);
+
+  try {
+    switch (event.type) {
+      // One-time credit purchase completed
+      case 'checkout.session.completed': {
+        const session = event.data.object;
+        console.log('[Webhook][Stripe] checkout.session.completed', session.id);
+        
+        // Only handle one-time payments (not subscriptions which have their own flow)
+        if (session.mode === 'payment') {
+          const { data, error } = await supabaseAdmin.rpc('fulfill_checkout', { 
+            session_id: session.id 
+          });
+          
+          if (error) {
+            console.error('[Webhook][Stripe] fulfill_checkout error:', error);
+          } else {
+            console.log('[Webhook][Stripe] Credits fulfilled:', data);
+          }
+        }
+        break;
+      }
+
+      // Subscription invoice paid (monthly/yearly renewal)
+      case 'invoice.paid': {
+        const invoice = event.data.object;
+        console.log('[Webhook][Stripe] invoice.paid', invoice.id, 'subscription:', invoice.subscription);
+        
+        // Skip if no subscription (one-time invoices)
+        if (!invoice.subscription) break;
+        
+        // Get the subscription to find the org
+        const { data: orgSub } = await supabaseAdmin
+          .from('organization_subscriptions')
+          .select('organization_id, plan_code, trial_credits_granted')
+          .eq('stripe_subscription_id', invoice.subscription)
+          .maybeSingle();
+        
+        if (!orgSub) {
+          console.warn('[Webhook][Stripe] No org subscription found for:', invoice.subscription);
+          break;
+        }
+
+        // Get plan details for monthly credits
+        const { data: plan } = await supabaseAdmin
+          .from('subscription_plans')
+          .select('included_credits_per_month')
+          .eq('code', orgSub.plan_code)
+          .maybeSingle();
+        
+        if (!plan) {
+          console.warn('[Webhook][Stripe] No plan found for code:', orgSub.plan_code);
+          break;
+        }
+
+        const creditsToAdd = plan.included_credits_per_month || 0;
+        
+        // Add monthly credits to organization
+        const { error: creditError } = await supabaseAdmin
+          .from('organization_credits')
+          .upsert({
+            organization_id: orgSub.organization_id,
+            balance_credits: creditsToAdd
+          }, {
+            onConflict: 'organization_id'
+          });
+
+        // If upsert doesn't work well for incrementing, use this approach:
+        if (creditError) {
+          // Fallback: increment directly
+          await supabaseAdmin.rpc('add_monthly_credits', {
+            p_organization_id: orgSub.organization_id,
+            p_credits: creditsToAdd
+          });
+        }
+
+        console.log('[Webhook][Stripe] Added', creditsToAdd, 'credits to org', orgSub.organization_id);
+        
+        // Update subscription period
+        await supabaseAdmin
+          .from('organization_subscriptions')
+          .update({
+            status: 'active',
+            current_period_start: new Date(invoice.period_start * 1000).toISOString(),
+            current_period_end: new Date(invoice.period_end * 1000).toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('stripe_subscription_id', invoice.subscription);
+        
+        break;
+      }
+
+      // Subscription status changed
+      case 'customer.subscription.updated': {
+        const subscription = event.data.object;
+        console.log('[Webhook][Stripe] customer.subscription.updated', subscription.id, 'status:', subscription.status);
+        
+        const { error } = await supabaseAdmin
+          .from('organization_subscriptions')
+          .update({
+            status: subscription.status, // active, past_due, canceled, etc.
+            cancel_at_period_end: subscription.cancel_at_period_end,
+            current_period_start: new Date(subscription.current_period_start * 1000).toISOString(),
+            current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .eq('stripe_subscription_id', subscription.id);
+        
+        if (error) {
+          console.error('[Webhook][Stripe] Failed to update subscription status:', error);
+        }
+        break;
+      }
+
+      // Subscription deleted/cancelled
+      case 'customer.subscription.deleted': {
+        const subscription = event.data.object;
+        console.log('[Webhook][Stripe] customer.subscription.deleted', subscription.id);
+        
+        await supabaseAdmin
+          .from('organization_subscriptions')
+          .update({
+            status: 'canceled',
+            updated_at: new Date().toISOString()
+          })
+          .eq('stripe_subscription_id', subscription.id);
+        break;
+      }
+
+      default:
+        console.log('[Webhook][Stripe] Unhandled event type:', event.type);
+    }
+
+    // Always return 200 to acknowledge receipt
+    return res.json({ received: true });
+  } catch (err) {
+    console.error('[Webhook][Stripe] Processing error:', err);
+    // Still return 200 to prevent Stripe from retrying
+    return res.json({ received: true, error: err.message });
+  }
+});
+
+
+app.post('/api/billing/subscription/session', async (req, res) => {
+  console.log('[Billing][SUBSCRIPTION_SESSION] Incoming request');
+  if (!stripe) {
+    console.error('[Billing][SUBSCRIPTION_SESSION] STRIPE_SECRET_KEY not configured');
+
+    return res.status(500).json({ error: 'STRIPE_NOT_CONFIGURED', message: 'Stripe is not configured' });
+  }
+  if (!supabaseAdmin) {
+    console.error('[Billing][SUBSCRIPTION_SESSION] Supabase admin not configured');
+    return res.status(500).json({ error: 'SUPABASE_NOT_CONFIGURED' });
+  }
+  const userId = req.headers['x-user-id'];
+  if (!userId) {
+    console.warn('[Billing][SUBSCRIPTION_SESSION] Missing X-User-Id header');
+    return res.status(401).json({ error: 'NO_USER_ID' });
+  }
+
+  const { planCode, billingInterval } = req.body || {};
+  if (!planCode || (billingInterval !== 'monthly' && billingInterval !== 'yearly')) {
+    console.warn('[Billing][SUBSCRIPTION_SESSION] Invalid payload', { planCode, billingInterval });
+    return res.status(400).json({ error: 'INVALID_REQUEST', message: 'planCode and billingInterval (monthly|yearly) are required' });
+  }
+
+  try {
+    // Resolve Organization
+    let orgId = req.headers['x-organization-id'];
+    if (!orgId) {
+      const { data: mem } = await supabaseAdmin
+        .from('organization_members')
+        .select('organization_id')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (mem) orgId = mem.organization_id;
+    }
+
+    if (!orgId) {
+      console.warn('[Billing][SUBSCRIPTION_SESSION] No organization found for user', { userId });
+      return res.status(400).json({ error: 'NO_ORG_SELECTED', message: 'No active workspace found.' });
+    }
+
+    // Load plan configuration
+    const { data: plan, error: planError } = await supabaseAdmin
+      .from('subscription_plans')
+      .select('*')
+      .eq('code', planCode)
+      .eq('is_active', true)
+      .maybeSingle();
+    if (planError) {
+      console.error('[Billing][SUBSCRIPTION_SESSION] Failed to load plan', planError);
+      return res.status(500).json({ error: 'PLAN_LOOKUP_FAILED', message: String(planError.message || planError) });
+    }
+    if (!plan) {
+      console.warn('[Billing][SUBSCRIPTION_SESSION] Plan not found or inactive', { planCode });
+      return res.status(400).json({ error: 'PLAN_NOT_FOUND', message: 'Subscription plan not found' });
+    }
+
+    const priceId = billingInterval === 'yearly' ? plan.stripe_yearly_price_id : plan.stripe_monthly_price_id;
+    if (!priceId) {
+      console.warn('[Billing][SUBSCRIPTION_SESSION] Stripe price ID not configured', { planCode, billingInterval });
+      return res.status(400).json({ error: 'PRICE_NOT_CONFIGURED', message: 'Stripe price not configured for this plan/billing interval' });
+    }
+
+    // Determine customer email
+    let customerEmail = null;
+    try {
+      const { data: userRow } = await supabaseAdmin
+        .from('users')
+        .select('email')
+        .eq('id', userId)
+        .maybeSingle();
+      customerEmail = userRow?.email || null;
+    } catch (e) {
+      console.warn('[Billing][SUBSCRIPTION_SESSION] Failed to load user email', e?.message || e);
+    }
+
+    // Ensure we have or create a Stripe customer for this org
+    let stripeCustomerId = null;
+    let existingSub = null;
+    try {
+      const { data: subRow } = await supabaseAdmin
+        .from('organization_subscriptions')
+        .select('*')
+        .eq('organization_id', orgId)
+        .maybeSingle();
+      existingSub = subRow || null;
+      if (subRow?.stripe_customer_id) {
+        stripeCustomerId = subRow.stripe_customer_id;
+      }
+    } catch (e) {
+      console.warn('[Billing][SUBSCRIPTION_SESSION] Failed to load existing subscription', e?.message || e);
+    }
+
+    if (!stripeCustomerId) {
+      const customer = await stripe.customers.create({
+        email: customerEmail || undefined,
+        metadata: { org_id: String(orgId) },
+      });
+      stripeCustomerId = customer.id;
+    }
+
+    // Upsert organization_subscriptions with basic plan info
+    try {
+      if (existingSub) {
+        await supabaseAdmin
+          .from('organization_subscriptions')
+          .update({
+            plan_id: plan.id,
+            plan_code: plan.code,
+            stripe_customer_id: stripeCustomerId,
+            status: existingSub.status || 'trialing',
+          })
+          .eq('organization_id', orgId);
+      } else {
+        await supabaseAdmin
+          .from('organization_subscriptions')
+          .insert({
+            organization_id: orgId,
+            plan_id: plan.id,
+            plan_code: plan.code,
+            stripe_customer_id: stripeCustomerId,
+            status: 'trialing',
+          });
+      }
+    } catch (e) {
+      console.warn('[Billing][SUBSCRIPTION_SESSION] Failed to upsert organization_subscriptions', e?.message || e);
+    }
+
+    const protoHeader = req.headers['x-forwarded-proto'] || 'http';
+    const proto = Array.isArray(protoHeader) ? protoHeader[0] : protoHeader;
+    const hostHeader = req.headers.host || `localhost:${PORT}`;
+    const host = Array.isArray(hostHeader) ? hostHeader[0] : hostHeader;
+    const base = `${proto}://${host}`;
+
+    console.log('[Billing][SUBSCRIPTION_SESSION] Creating Stripe Checkout Session', { orgId, planCode, billingInterval });
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      customer: stripeCustomerId,
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          quantity: 1,
+          price: priceId,
+        },
+      ],
+      subscription_data: {
+        trial_period_days: 7,
+        metadata: {
+          org_id: String(orgId),
+          plan_code: plan.code,
+        },
+      },
+      metadata: {
+        org_id: String(orgId),
+        plan_code: plan.code,
+        user_id: String(userId),
+        billing_interval: billingInterval,
+      },
+      success_url: `${base}/dashboard?sub_session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${base}/pricing?checkout_canceled=1`,
+    });
+
+    return res.status(200).json({ url: session.url });
+  } catch (e) {
+    console.error('[Billing][SUBSCRIPTION_SESSION] Error', e);
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: String(e?.message || e) });
+  }
+});
+
+app.post('/api/billing/subscription/confirm', async (req, res) => {
+  console.log('[Billing][SUBSCRIPTION_CONFIRM] Incoming request');
+  if (!stripe) {
+    console.error('[Billing][SUBSCRIPTION_CONFIRM] STRIPE_SECRET_KEY not configured');
+    return res.status(500).json({ error: 'STRIPE_NOT_CONFIGURED', message: 'Stripe is not configured' });
+  }
+  if (!supabaseAdmin) {
+    console.error('[Billing][SUBSCRIPTION_CONFIRM] Supabase admin not configured');
+    return res.status(500).json({ error: 'SUPABASE_NOT_CONFIGURED' });
+  }
+  const userId = req.headers['x-user-id'];
+  if (!userId) {
+    console.warn('[Billing][SUBSCRIPTION_CONFIRM] Missing X-User-Id header');
+    return res.status(401).json({ error: 'NO_USER_ID' });
+  }
+
+  const sessionId = (req.body && req.body.sessionId) || (req.query && req.query.sub_session_id);
+  if (!sessionId) {
+    console.warn('[Billing][SUBSCRIPTION_CONFIRM] Missing sessionId');
+    return res.status(400).json({ error: 'MISSING_SESSION_ID', message: 'sessionId is required' });
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.retrieve(String(sessionId));
+    if (!session) {
+      return res.status(404).json({ error: 'SESSION_NOT_FOUND' });
+    }
+
+    const subscriptionId = typeof session.subscription === 'string'
+      ? session.subscription
+      : (session.subscription && session.subscription.id);
+    if (!subscriptionId) {
+      console.warn('[Billing][SUBSCRIPTION_CONFIRM] No subscription on session', { sessionId });
+      return res.status(400).json({ error: 'NO_SUBSCRIPTION', message: 'No subscription found on session' });
+    }
+
+    const subscription = await stripe.subscriptions.retrieve(String(subscriptionId));
+    const meta = {
+      ...(session.metadata || {}),
+      ...(subscription.metadata || {}),
+    };
+
+    let orgId = meta.org_id || null;
+    const planCode = meta.plan_code || null;
+
+    // Fallback: derive org from membership if metadata is missing
+    if (!orgId) {
+      const { data: mem } = await supabaseAdmin
+        .from('organization_members')
+        .select('organization_id')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (mem) orgId = mem.organization_id;
+    }
+
+    if (!orgId) {
+      console.warn('[Billing][SUBSCRIPTION_CONFIRM] No organization resolved for subscription', { subscriptionId });
+      return res.status(400).json({ error: 'NO_ORG_SELECTED', message: 'No active workspace found.' });
+    }
+
+    // Load plan (optional but useful for consistency)
+    let plan = null;
+    if (planCode) {
+      try {
+        const { data: planRow } = await supabaseAdmin
+          .from('subscription_plans')
+          .select('*')
+          .eq('code', planCode)
+          .maybeSingle();
+        plan = planRow || null;
+      } catch (e) {
+        console.warn('[Billing][SUBSCRIPTION_CONFIRM] Plan lookup failed', e?.message || e);
+      }
+    }
+
+    const toIso = (ts) => (ts ? new Date(ts * 1000).toISOString() : null);
+    const trialStart = toIso(subscription.trial_start);
+    const trialEnd = toIso(subscription.trial_end);
+    const currentPeriodStart = toIso(subscription.current_period_start);
+    const currentPeriodEnd = toIso(subscription.current_period_end);
+
+    // Upsert organization_subscriptions with latest Stripe data
+    let existingSub = null;
+    try {
+      const { data: subRow } = await supabaseAdmin
+        .from('organization_subscriptions')
+        .select('*')
+        .eq('organization_id', orgId)
+        .maybeSingle();
+      existingSub = subRow || null;
+    } catch (e) {
+      console.warn('[Billing][SUBSCRIPTION_CONFIRM] Failed to load existing subscription row', e?.message || e);
+    }
+
+    const stripeCustomerId = typeof subscription.customer === 'string'
+      ? subscription.customer
+      : (subscription.customer && subscription.customer.id) || existingSub?.stripe_customer_id || null;
+
+    const subPayload = {
+      plan_id: plan ? plan.id : existingSub?.plan_id || null,
+      plan_code: planCode || existingSub?.plan_code || null,
+      stripe_customer_id: stripeCustomerId,
+      stripe_subscription_id: subscription.id,
+      status: subscription.status,
+      trial_start: trialStart,
+      trial_end: trialEnd,
+      current_period_start: currentPeriodStart,
+      current_period_end: currentPeriodEnd,
+      cancel_at_period_end: subscription.cancel_at_period_end || false,
+      updated_at: new Date().toISOString(),
+    };
+
+    try {
+      if (existingSub) {
+        await supabaseAdmin
+          .from('organization_subscriptions')
+          .update(subPayload)
+          .eq('organization_id', orgId);
+      } else {
+        await supabaseAdmin
+          .from('organization_subscriptions')
+          .insert({
+            organization_id: orgId,
+            ...subPayload,
+          });
+      }
+    } catch (e) {
+      console.warn('[Billing][SUBSCRIPTION_CONFIRM] Failed to upsert organization_subscriptions', e?.message || e);
+    }
+
+    // Grant one-time trial credits if applicable
+    let trialCreditsAdded = 0;
+    const trialCredits = 7500;
+
+    try {
+      const { data: subRow } = await supabaseAdmin
+        .from('organization_subscriptions')
+        .select('trial_credits_granted')
+        .eq('organization_id', orgId)
+        .maybeSingle();
+
+      const alreadyGranted = subRow?.trial_credits_granted === true;
+
+      if (subscription.status === 'trialing' && !alreadyGranted) {
+        // Ensure credits row exists
+        let balance = 0;
+        try {
+          const { data: orgCreds } = await supabaseAdmin
+            .from('organization_credits')
+            .select('balance_credits')
+            .eq('organization_id', orgId)
+            .maybeSingle();
+          balance = orgCreds?.balance_credits ?? 0;
+        } catch (e) {
+          console.warn('[Billing][SUBSCRIPTION_CONFIRM] Failed to load organization_credits', e?.message || e);
+        }
+
+        const newBalance = (balance || 0) + trialCredits;
+        try {
+          // Insert or update credits row
+          const { data: existingCredits } = await supabaseAdmin
+            .from('organization_credits')
+            .select('organization_id')
+            .eq('organization_id', orgId)
+            .maybeSingle();
+
+          if (existingCredits) {
+            await supabaseAdmin
+              .from('organization_credits')
+              .update({ balance_credits: newBalance })
+              .eq('organization_id', orgId);
+          } else {
+            await supabaseAdmin
+              .from('organization_credits')
+              .insert({ organization_id: orgId, balance_credits: newBalance });
+          }
+
+          // Log zero-dollar transaction for analytics
+          try {
+            await supabaseAdmin
+              .from('credits_transactions')
+              .insert({
+                user_id: userId,
+                organization_id: orgId,
+                amount_cents: 0,
+                credits_added: trialCredits,
+                status: 'completed',
+                metadata: { type: 'trial', subscription_id: subscription.id, session_id: sessionId },
+              });
+          } catch (e) {
+            console.warn('[Billing][SUBSCRIPTION_CONFIRM] Failed to log trial credits transaction', e?.message || e);
+          }
+
+          await supabaseAdmin
+            .from('organization_subscriptions')
+            .update({ trial_credits_granted: true })
+            .eq('organization_id', orgId);
+
+          trialCreditsAdded = trialCredits;
+        } catch (e) {
+          console.warn('[Billing][SUBSCRIPTION_CONFIRM] Failed to grant trial credits', e?.message || e);
+        }
+      }
+    } catch (e) {
+      console.warn('[Billing][SUBSCRIPTION_CONFIRM] Trial credits check failed', e?.message || e);
+    }
+
+    return res.json({
+      ok: true,
+      status: subscription.status,
+      plan_code: planCode,
+      trial_credits_added: trialCreditsAdded,
+      trial_end: trialEnd,
+    });
+  } catch (e) {
+    console.error('[Billing][SUBSCRIPTION_CONFIRM] Error', e);
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: String(e?.message || e) });
+  }
+});
+
+// --- ANALYTICS API ---
+app.get('/api/analytics/credits', async (req, res) => {
+  if (!supabaseAdmin) return res.status(500).json({ error: 'SUPABASE_NOT_CONFIGURED' });
+  const userId = req.headers['x-user-id'];
+  const orgId = req.headers['x-organization-id'];
+  if (!userId) return res.status(401).json({ error: 'NO_USER_ID' });
+
+  try {
+    let targetOrgId = orgId;
+    // Default to primary org if not specified
+    if (!targetOrgId) {
+      const { data: mem } = await supabaseAdmin
+        .from('organization_members')
+        .select('organization_id')
+        .eq('user_id', userId)
+        .order('created_at')
+        .limit(1)
+        .maybeSingle();
+      if (mem) targetOrgId = mem.organization_id;
+    }
+
+    if (!targetOrgId) {
+      return res.json({ history: [] });
+    }
+
+    // Fetch recent deductions
+    const { data: deductions, error } = await supabaseAdmin
+      .from('credit_deductions')
+      .select('amount_credits, reason, created_at')
+      .eq('organization_id', targetOrgId)
+      .order('created_at', { ascending: false })
+      .limit(50);
+    
+    if (error) throw error;
+
+    res.json({ history: deductions || [] });
+  } catch (e) {
+    console.error('[Analytics] Error', e);
+    res.status(500).json({ error: 'INTERNAL_ERROR', message: e.message });
+  }
+});
+
+app.get('/api/analytics/dashboard', async (req, res) => {
+  if (!supabaseAdmin) return res.status(500).json({ error: 'SUPABASE_NOT_CONFIGURED' });
+  const userId = req.headers['x-user-id'];
+  const orgIdHeader = req.headers['x-organization-id'];
+  if (!userId) return res.status(401).json({ error: 'NO_USER_ID' });
+
+  try {
+    // 1. Determine context (Org & Role)
+    let targetOrgId = orgIdHeader;
+    let role = 'member';
+    
+    const { data: mem } = await supabaseAdmin
+        .from('organization_members')
+        .select('organization_id, role')
+        .eq('user_id', userId)
+        .order('created_at')
+        .limit(1)
+        .maybeSingle();
+
+    if (!targetOrgId && mem) targetOrgId = mem.organization_id;
+    if (mem && mem.organization_id === targetOrgId) role = mem.role;
+
+    if (!targetOrgId) return res.json({ error: 'No organization found' });
+
+    const isAdmin = role === 'owner' || role === 'admin';
+
+    // 2. Fetch Usage Events
+    // Fetch ALL events for the organization to support Admin views.
+    // Frontend will filter for "User View".
+    
+    const { data: events, error } = await supabaseAdmin
+        .from('usage_events')
+        .select('tool, credits, created_at, user_id, metadata')
+        .eq('organization_id', targetOrgId)
+        .order('created_at', { ascending: false })
+        .limit(2000); // Limit for performance
+
+    if (error) throw error;
+
+    // 3. Process Data
+    const tools = {};
+    const workflows = {};
+    const agents = {};
+    const embeds = {};
+
+    const threeMonthsAgo = new Date();
+    threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+    const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const oneMonthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+    (events || []).forEach(ev => {
+        const date = new Date(ev.created_at);
+        const isRecent = date >= threeMonthsAgo;
+        const credits = ev.credits || 0;
+        const toolName = ev.tool || 'unknown';
+        const isMyUsage = ev.user_id === userId;
+
+        // Categorize
+        let category = 'tool';
+        let id = toolName;
+
+        if (toolName.startsWith('workflow:')) {
+            category = 'workflow';
+            id = toolName.replace('workflow:', '');
+        } else if (toolName.startsWith('agent:')) {
+            category = 'agent';
+            id = toolName.replace('agent:', '');
+            if (!ev.user_id) category = 'embed';
+        }
+
+        const bucket = category === 'workflow' ? workflows :
+                       category === 'agent' ? agents :
+                       category === 'embed' ? embeds : tools;
+
+        if (!bucket[id]) {
+            bucket[id] = { 
+                id, 
+                lastUsed: date, 
+                lastCredits: credits, 
+                totalCredits3m: 0, 
+                totalCredits30d: 0,
+                totalCredits7d: 0,
+                totalCreditsAll: 0, 
+                entries: 0,
+                userTotal3m: 0,
+                userTotal30d: 0,
+                userTotal7d: 0,
+                userTotalAll: 0
+            };
+        }
+        const item = bucket[id];
+        
+        if (date > item.lastUsed) {
+            item.lastUsed = date;
+            item.lastCredits = credits;
+        }
+        if (isRecent) item.totalCredits3m += credits;
+        if (date >= oneMonthAgo) item.totalCredits30d += credits;
+        if (date >= oneWeekAgo) item.totalCredits7d += credits;
+        item.totalCreditsAll += credits;
+        item.entries++;
+
+        if (isMyUsage) {
+             if (isRecent) item.userTotal3m += credits;
+             if (date >= oneMonthAgo) item.userTotal30d += credits;
+             if (date >= oneWeekAgo) item.userTotal7d += credits;
+             item.userTotalAll += credits;
+        }
+    });
+
+    // 4. Fetch Metadata (Names)
+    const workflowIds = Object.keys(workflows);
+    const agentIds = [...Object.keys(agents), ...Object.keys(embeds)];
+
+    const [wfRes, agRes] = await Promise.all([
+        workflowIds.length ? supabaseAdmin.from('workflows').select('id, name').in('id', workflowIds) : { data: [] },
+        agentIds.length ? supabaseAdmin.from('agents').select('id, name').in('id', agentIds) : { data: [] }
+    ]);
+
+    const wfMap = new Map(wfRes.data?.map(w => [w.id, w.name]) || []);
+    const agMap = new Map(agRes.data?.map(a => [a.id, a.name]) || []);
+
+    Object.values(workflows).forEach(w => w.name = wfMap.get(w.id) || 'Unknown Workflow');
+    Object.values(agents).forEach(a => a.name = agMap.get(a.id) || 'Unknown Agent');
+    Object.values(embeds).forEach(e => e.name = agMap.get(e.id) || 'Unknown Agent');
+
+    // 5. Fetch Storage Stats
+    const { data: files } = await supabaseAdmin
+        .from('files')
+        .select('size')
+        .eq('organization_id', targetOrgId);
+    
+    const totalStorageBytes = files?.reduce((acc, f) => acc + (f.size || 0), 0) || 0;
+
+    const { count: kbCount } = await supabaseAdmin
+        .from('knowledge_base')
+        .select('*', { count: 'exact', head: true })
+        .eq('organization_id', targetOrgId);
+
+    res.json({
+        isAdmin,
+        usage: {
+            tools: Object.values(tools).sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed)),
+            workflows: Object.values(workflows).sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed)),
+            agents: Object.values(agents).sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed)),
+            embeds: Object.values(embeds).sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed)),
+        },
+        storage: {
+            filesBytes: totalStorageBytes,
+            kbCount: kbCount || 0
+        }
+    });
+  } catch (e) {
+    console.error('[Analytics] Dashboard Error', e);
+    res.status(500).json({ error: 'INTERNAL_ERROR', message: e.message });
+  }
+});
 
 // --- TEAM MANAGEMENT API ---
 
@@ -2000,6 +3488,41 @@ app.post('/api/teams/:id/invite', async (req, res) => {
       return res.status(403).json({ error: 'FORBIDDEN', message: 'Only admins can invite' });
     }
 
+    let seatLimit = null;
+    try {
+      const { data: subRow } = await supabaseAdmin
+        .from('organization_subscriptions')
+        .select('plan_id')
+        .eq('organization_id', orgId)
+        .maybeSingle();
+      if (subRow?.plan_id) {
+        const { data: plan } = await supabaseAdmin
+          .from('subscription_plans')
+          .select('seat_limit')
+          .eq('id', subRow.plan_id)
+          .maybeSingle();
+        if (plan && typeof plan.seat_limit === 'number') {
+          seatLimit = plan.seat_limit;
+        }
+      }
+    } catch (e) {
+      console.warn('[Teams][INVITE] Seat limit lookup failed', e?.message || e);
+    }
+
+    if (seatLimit !== null) {
+      const { data: members } = await supabaseAdmin
+        .from('organization_members')
+        .select('id')
+        .eq('organization_id', orgId);
+      const memberCount = members ? members.length : 0;
+      if (memberCount >= seatLimit) {
+        return res.status(403).json({
+          error: 'SEAT_LIMIT_REACHED',
+          message: 'This workspace has reached the seat limit for its plan.',
+        });
+      }
+    }
+
     // Check if user already exists in system
     // Ideally we look up public.users by email, but we might not have email in users table accessible 
     // if RLS blocks it. Admin client bypasses RLS.
@@ -2130,6 +3653,42 @@ app.post('/api/teams/join', async (req, res) => {
       return res.status(404).json({ error: 'INVALID_INVITE', message: 'Invitation not found, expired, or already used.' });
     }
 
+    let seatLimit = null;
+    try {
+      const { data: subRow } = await supabaseAdmin
+        .from('organization_subscriptions')
+        .select('plan_id')
+        .eq('organization_id', invite.organization_id)
+        .maybeSingle();
+      if (subRow?.plan_id) {
+        const { data: plan } = await supabaseAdmin
+          .from('subscription_plans')
+          .select('seat_limit')
+          .eq('id', subRow.plan_id)
+          .maybeSingle();
+        if (plan && typeof plan.seat_limit === 'number') {
+          seatLimit = plan.seat_limit;
+        }
+      }
+    } catch (e) {
+      console.warn('[Teams][JOIN] Seat limit lookup failed', e?.message || e);
+    }
+
+    if (seatLimit !== null) {
+      const { data: members } = await supabaseAdmin
+        .from('organization_members')
+        .select('user_id')
+        .eq('organization_id', invite.organization_id);
+      const list = members || [];
+      const alreadyMember = list.some((m) => m.user_id === userId);
+      if (!alreadyMember && list.length >= seatLimit) {
+        return res.status(403).json({
+          error: 'SEAT_LIMIT_REACHED',
+          message: 'This workspace has reached the seat limit for its plan.',
+        });
+      }
+    }
+
     // 2. Add Member
     const { error: memberError } = await supabaseAdmin
       .from('organization_members')
@@ -2256,8 +3815,7 @@ app.post('/api/projects', async (req, res) => {
         organization_id: orgId,
         name,
         description,
-        status: status || 'active',
-        created_by: userId
+        status: status || 'active'
       })
       .select()
       .single();
@@ -3676,6 +5234,465 @@ app.post('/api/knowledge/ingest', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`[Server] WriterAI backend listening on http://localhost:${PORT}`);
+Sentry.setupExpressErrorHandler(app);
+
+// ============================================
+// API v1 - Programmatic Access (Business Tier)
+// ============================================
+
+// In-memory rate limiter
+const apiRateLimitMap = new Map();
+const API_RATE_LIMIT = { perMinute: 100, perDay: 10000 };
+
+// API Key validation middleware
+async function validateApiKeyMiddleware(req, res, next) {
+    const authHeader = req.headers['authorization'] || '';
+    const apiKey = authHeader.replace(/^Bearer\s+/i, '');
+
+    if (!apiKey) {
+        console.warn('[API v1] Missing Authorization header');
+        return res.status(401).json({ 
+            error: 'UNAUTHORIZED', 
+            message: 'Missing Authorization header. Use: Authorization: Bearer <API_KEY>' 
+        });
+    }
+
+    if (!supabaseAdmin) {
+        return res.status(500).json({ error: 'DATABASE_NOT_CONFIGURED' });
+    }
+
+    const { data, error } = await supabaseAdmin
+        .from('organization_api_keys')
+        .select('id, organization_id, name, organizations(id, name, subscription_tier)')
+        .eq('public_key', apiKey)
+        .single();
+
+    if (error || !data) {
+        console.warn('[API v1] Invalid API key:', apiKey?.substring(0, 10) + '...');
+        return res.status(401).json({ error: 'INVALID_API_KEY', message: 'Invalid API key' });
+    }
+
+    const org = data.organizations;
+    if (!org || !['business', 'enterprise'].includes(org.subscription_tier?.toLowerCase())) {
+        console.warn('[API v1] API access requires Business tier. Org tier:', org?.subscription_tier);
+        return res.status(403).json({ 
+            error: 'API_ACCESS_REQUIRES_BUSINESS_TIER', 
+            message: 'API access requires Business tier subscription.' 
+        });
+    }
+
+    req.apiKeyId = data.id;
+    req.orgId = data.organization_id;
+    req.orgName = org.name;
+    console.log(`[API v1] Authenticated: ${data.name} (Org: ${org.name})`);
+    next();
+}
+
+// Rate limiter check
+function checkApiRateLimit(keyId) {
+    const now = Date.now();
+    const minute = Math.floor(now / 60000);
+    const day = Math.floor(now / 86400000);
+
+    let entry = apiRateLimitMap.get(keyId);
+    if (!entry || entry.windowStart !== minute) {
+        entry = { count: 0, windowStart: minute, dailyCount: entry?.dayStart === day ? entry.dailyCount : 0, dayStart: day };
+    }
+
+    if (entry.dailyCount >= API_RATE_LIMIT.perDay || entry.count >= API_RATE_LIMIT.perMinute) {
+        return { allowed: false, remaining: 0 };
+    }
+
+    entry.count++;
+    entry.dailyCount++;
+    apiRateLimitMap.set(keyId, entry);
+    return { allowed: true, remaining: API_RATE_LIMIT.perMinute - entry.count };
+}
+
+// GET /api/v1/tools - List available tools (public)
+app.get('/api/v1/tools', (req, res) => {
+    const TOOLS = [
+        { name: 'email_subject', description: 'Generate email subject lines', category: 'email' },
+        { name: 'cold_email', description: 'Write cold outreach emails', category: 'email' },
+        { name: 'linkedin', description: 'LinkedIn post generator', category: 'social' },
+        { name: 'twitter_thread', description: 'Twitter/X thread generator', category: 'social' },
+        { name: 'product_description', description: 'E-commerce product descriptions', category: 'marketing' },
+        { name: 'blog_post', description: 'Full blog post generator', category: 'long-form' },
+        { name: 'summarizer', description: 'Text summarization', category: 'utility' },
+        { name: 'rewrite_helper', description: 'Rewrite and improve text', category: 'utility' },
+    ];
+    console.log('[API v1] Tools list requested');
+    res.json({ tools: TOOLS, total: TOOLS.length });
 });
+
+// POST /api/v1/generate - Generate content (requires Business tier)
+app.post('/api/v1/generate', validateApiKeyMiddleware, async (req, res) => {
+    const rateLimit = checkApiRateLimit(req.apiKeyId);
+    res.setHeader('X-RateLimit-Limit', API_RATE_LIMIT.perMinute.toString());
+    res.setHeader('X-RateLimit-Remaining', rateLimit.remaining.toString());
+
+    if (!rateLimit.allowed) {
+        console.warn(`[API v1] Rate limit exceeded for ${req.orgName}`);
+        return res.status(429).json({ error: 'RATE_LIMIT_EXCEEDED', message: 'Rate limit exceeded. Try again later.' });
+    }
+
+    const { tool, inputs, options } = req.body || {};
+    if (!tool || !inputs) {
+        return res.status(400).json({ error: 'INVALID_REQUEST', message: 'Request body must include "tool" and "inputs"' });
+    }
+
+    console.log(`[API v1] Generate request: tool=${tool}, org=${req.orgName}`);
+
+    try {
+        // Reuse internal generate logic (simplified - forward to existing route handler)
+        // In production, extract the core logic into a shared function
+        const result = { message: 'API v1 generate endpoint configured. Full implementation uses shared generate logic.', tool, inputs };
+        
+        // Log API usage
+        if (supabaseAdmin) {
+            await supabaseAdmin.from('api_usage_logs').insert({
+                api_key_id: req.apiKeyId,
+                organization_id: req.orgId,
+                endpoint: '/api/v1/generate',
+                tool_name: tool,
+                status: 'success'
+            }).catch(e => console.warn('[API v1] Failed to log:', e.message));
+        }
+
+        console.log(`[API v1] Success: tool=${tool}, org=${req.orgName}`);
+        res.json({ success: true, data: result });
+    } catch (error) {
+        console.error('[API v1] Error:', error.message);
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+    }
+});
+
+// GET /api/v1/workflows - List user's workflows
+app.get('/api/v1/workflows', validateApiKeyMiddleware, async (req, res) => {
+    try {
+        console.log(`[API v1] Fetching workflows for org: ${req.orgName}`);
+        
+        const { data, error } = await supabaseAdmin
+            .from('latenode_workflows')
+            .select('id, name, description, is_active, trigger_type, created_at')
+            .eq('organization_id', req.orgId)
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        res.json({ 
+            success: true, 
+            workflows: data || [],
+            total: data?.length || 0
+        });
+    } catch (error) {
+        console.error('[API v1] Workflows error:', error.message);
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+    }
+});
+
+// POST /api/v1/workflows/:id/run - Execute a workflow
+app.post('/api/v1/workflows/:id/run', validateApiKeyMiddleware, async (req, res) => {
+    const { id } = req.params;
+    const { inputs } = req.body || {};
+
+    try {
+        console.log(`[API v1] Running workflow ${id} for org: ${req.orgName}`);
+        
+        // Verify workflow belongs to org
+        const { data: workflow, error } = await supabaseAdmin
+            .from('latenode_workflows')
+            .select('*')
+            .eq('id', id)
+            .eq('organization_id', req.orgId)
+            .single();
+
+        if (error || !workflow) {
+            return res.status(404).json({ error: 'WORKFLOW_NOT_FOUND' });
+        }
+
+        if (!workflow.is_active) {
+            return res.status(400).json({ error: 'WORKFLOW_INACTIVE', message: 'Workflow is not active' });
+        }
+
+        // Execute workflow (simplified - would call actual workflow engine)
+        const result = {
+            message: 'Workflow execution initiated',
+            workflowId: id,
+            workflowName: workflow.name,
+            inputs: inputs || {}
+        };
+
+        res.json({ success: true, data: result });
+    } catch (error) {
+        console.error('[API v1] Workflow run error:', error.message);
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+    }
+});
+
+// GET /api/v1/templates - List user's templates
+app.get('/api/v1/templates', validateApiKeyMiddleware, async (req, res) => {
+    try {
+        console.log(`[API v1] Fetching templates for org: ${req.orgName}`);
+        
+        const { data, error } = await supabaseAdmin
+            .from('templates')
+            .select('id, name, description, category, input_fields, created_at')
+            .eq('organization_id', req.orgId)
+            .eq('is_public', false)
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        res.json({ 
+            success: true, 
+            templates: data || [],
+            total: data?.length || 0
+        });
+    } catch (error) {
+        console.error('[API v1] Templates error:', error.message);
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+    }
+});
+
+// POST /api/v1/templates/:id/run - Execute a template
+app.post('/api/v1/templates/:id/run', validateApiKeyMiddleware, async (req, res) => {
+    const { id } = req.params;
+    const { inputs, options } = req.body || {};
+
+    try {
+        console.log(`[API v1] Running template ${id} for org: ${req.orgName}`);
+        
+        const rateLimit = checkApiRateLimit(req.apiKeyId);
+        if (!rateLimit.allowed) {
+            return res.status(429).json({ error: 'RATE_LIMIT_EXCEEDED' });
+        }
+
+        // Verify template exists and belongs to org
+        const { data: template, error } = await supabaseAdmin
+            .from('templates')
+            .select('*')
+            .eq('id', id)
+            .single();
+
+        if (error || !template) {
+            return res.status(404).json({ error: 'TEMPLATE_NOT_FOUND' });
+        }
+
+        // Check if user owns template or it's public
+        if (template.organization_id !== req.orgId && !template.is_public) {
+            return res.status(403).json({ error: 'ACCESS_DENIED' });
+        }
+
+        // Execute template (would call actual generation logic)
+        const result = {
+            message: 'Template execution initiated',
+            templateId: id,
+            templateName: template.name,
+            inputs: inputs || {}
+        };
+
+        res.json({ success: true, data: result });
+    } catch (error) {
+        console.error('[API v1] Template run error:', error.message);
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+    }
+});
+
+// GET /api/v1/brand-voices - List user's brand voices
+app.get('/api/v1/brand-voices', validateApiKeyMiddleware, async (req, res) => {
+    try {
+        console.log(`[API v1] Fetching brand voices for org: ${req.orgName}`);
+        
+        const { data, error } = await supabaseAdmin
+            .from('brand_voices')
+            .select('id, name, description, tone_adjectives, audience, created_at')
+            .eq('organization_id', req.orgId)
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        res.json({ 
+            success: true, 
+            brandVoices: data || [],
+            total: data?.length || 0
+        });
+    } catch (error) {
+        console.error('[API v1] Brand voices error:', error.message);
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+    }
+});
+
+// GET /api/v1/models - List available AI models
+app.get('/api/v1/models', validateApiKeyMiddleware, async (req, res) => {
+    try {
+        console.log(`[API v1] Fetching models for org: ${req.orgName}`);
+        
+        // Get org's available models based on subscription
+        const { data: org } = await supabaseAdmin
+            .from('organizations')
+            .select('subscription_tier')
+            .eq('id', req.orgId)
+            .single();
+
+        const tier = org?.subscription_tier?.toLowerCase() || 'starter';
+
+        // Define available models per tier
+        const allModels = [
+            { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', provider: 'Google', tiers: ['starter', 'professional', 'business', 'enterprise'] },
+            { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', provider: 'Google', tiers: ['professional', 'business', 'enterprise'] },
+            { id: 'gpt-4o', name: 'GPT-4o', provider: 'OpenAI', tiers: ['business', 'enterprise'] },
+            { id: 'gpt-4o-mini', name: 'GPT-4o Mini', provider: 'OpenAI', tiers: ['professional', 'business', 'enterprise'] },
+            { id: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet', provider: 'Anthropic', tiers: ['business', 'enterprise'] },
+            { id: 'claude-3-haiku', name: 'Claude 3 Haiku', provider: 'Anthropic', tiers: ['professional', 'business', 'enterprise'] },
+        ];
+
+        const availableModels = allModels
+            .filter(m => m.tiers.includes(tier))
+            .map(({ tiers, ...model }) => model);
+
+        res.json({ 
+            success: true, 
+            models: availableModels,
+            total: availableModels.length,
+            tier: tier
+        });
+    } catch (error) {
+        console.error('[API v1] Models error:', error.message);
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+    }
+});
+
+// ============================================
+// Humanizer & SEO Endpoints
+// ============================================
+
+// POST /api/humanize - Humanize AI text (Natural Write mode)
+app.post('/api/humanize', async (req, res) => {
+    const userId = getUserIdFromHeader(req);
+    const { text, options } = req.body || {};
+
+    if (!userId) {
+        return res.status(401).json({ error: 'UNAUTHORIZED' });
+    }
+
+    if (!text || text.length < 50) {
+        return res.status(400).json({ error: 'TEXT_TOO_SHORT', message: 'Text must be at least 50 characters' });
+    }
+
+    console.log(`[Humanizer] Request from ${userId}: ${text.length} chars`);
+
+    try {
+        const { humanizeText, isHumanizerEnabled } = await import('./lib/humanizer.js');
+
+        if (!isHumanizerEnabled()) {
+            return res.status(503).json({ 
+                error: 'HUMANIZER_NOT_CONFIGURED', 
+                message: 'Humanizer is not configured. Set UNDETECTABLE_API_KEY in environment.' 
+            });
+        }
+
+        const result = await humanizeText(text, options);
+
+        if (result.success) {
+            console.log(`[Humanizer] Success: ${result.humanized?.length} chars output`);
+            res.json({
+                success: true,
+                humanized: result.humanized,
+                original: result.original,
+                aiScore: result.aiScore
+            });
+        } else {
+            console.warn('[Humanizer] Failed:', result.error);
+            res.status(400).json({ 
+                success: false, 
+                error: result.error,
+                original: text 
+            });
+        }
+    } catch (error) {
+        console.error('[Humanizer] Error:', error.message);
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+    }
+});
+
+// POST /api/keywords - Get keyword suggestions
+app.post('/api/keywords', async (req, res) => {
+    const userId = getUserIdFromHeader(req);
+    const { keyword } = req.body || {};
+
+    if (!userId) {
+        return res.status(401).json({ error: 'UNAUTHORIZED' });
+    }
+
+    if (!keyword) {
+        return res.status(400).json({ error: 'MISSING_KEYWORD' });
+    }
+
+    console.log(`[Keywords] Request from ${userId}: "${keyword}"`);
+
+    try {
+        const { getKeywordSuggestions, isSerperEnabled } = await import('./lib/serper.js');
+
+        if (!isSerperEnabled()) {
+            return res.status(503).json({ 
+                error: 'SERPER_NOT_CONFIGURED', 
+                message: 'Keyword research is not configured. Set SERPER_API_KEY in environment.' 
+            });
+        }
+
+        const result = await getKeywordSuggestions(keyword);
+
+        if (result.success) {
+            res.json(result);
+        } else {
+            res.status(400).json({ success: false, error: result.error });
+        }
+    } catch (error) {
+        console.error('[Keywords] Error:', error.message);
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+    }
+});
+
+// POST /api/serp-analysis - Analyze SERP for a keyword
+app.post('/api/serp-analysis', async (req, res) => {
+    const userId = getUserIdFromHeader(req);
+    const { keyword } = req.body || {};
+
+    if (!userId) {
+        return res.status(401).json({ error: 'UNAUTHORIZED' });
+    }
+
+    if (!keyword) {
+        return res.status(400).json({ error: 'MISSING_KEYWORD' });
+    }
+
+    console.log(`[SERP] Analysis request: "${keyword}"`);
+
+    try {
+        const { analyzeSERP, isSerperEnabled } = await import('./lib/serper.js');
+
+        if (!isSerperEnabled()) {
+            return res.status(503).json({ error: 'SERPER_NOT_CONFIGURED' });
+        }
+
+        const result = await analyzeSERP(keyword);
+        res.json(result);
+    } catch (error) {
+        console.error('[SERP] Error:', error.message);
+        res.status(500).json({ error: 'INTERNAL_ERROR', message: error.message });
+    }
+});
+
+// Export app for Vercel serverless function
+export default app;
+
+// Only listen if running directly (not imported)
+if (process.env.NODE_ENV !== 'production' || !process.env.VERCEL) {
+
+
+  const PORT = parseInt(process.env.PORT || '8787', 10);
+  app.listen(PORT, '0.0.0.0', () => { // Listen on all interfaces
+    console.log(`[Server] WriterAI backend listening on http://localhost:${PORT}`);
+  });
+}

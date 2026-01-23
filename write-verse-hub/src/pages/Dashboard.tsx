@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ToolLayout } from "@/components/tool/ToolLayout";
 import { Button } from "@/components/ui/button-brutal";
-import { getProfile, createCheckoutSession, confirmCheckout } from "@/lib/api";
+import { getProfile, createCheckoutSession, confirmCheckout, confirmSubscription } from "@/lib/api";
 import { useTeam } from "@/context/TeamContext";
 import { getTeamCredits } from "@/lib/api-teams";
 
@@ -54,35 +54,53 @@ const Dashboard = () => {
     try {
       const url = new URL(window.location.href);
       const sessionId = url.searchParams.get("session_id");
-      if (!sessionId) return;
+      const subSessionId = url.searchParams.get("sub_session_id");
+      if (!sessionId && !subSessionId) return;
 
-      console.groupCollapsed("[Dashboard] Confirm checkout", sessionId);
+      console.groupCollapsed("[Dashboard] Confirm billing session", sessionId || subSessionId);
       setCheckingSession(true);
       (async () => {
         try {
-          const result = await confirmCheckout(sessionId);
-          if (result.ok) {
-            setCheckoutMessage(
-              result.alreadyConfirmed
-                ? "Checkout already confirmed. Credits are up to date."
-                : `Added ${result.credits_added ?? 0} credits. New balance: ${result.new_balance ?? "N/A"}.`
-            );
+          if (sessionId) {
+            const result = await confirmCheckout(sessionId);
+            if (result.ok) {
+              setCheckoutMessage(
+                result.alreadyConfirmed
+                  ? "Checkout already confirmed. Credits are up to date."
+                  : `Added ${result.credits_added ?? 0} credits. New balance: ${result.new_balance ?? "N/A"}.`
+              );
+            }
+          } else if (subSessionId) {
+            const result = await confirmSubscription(subSessionId);
+            if (result.ok) {
+              const parts: string[] = [];
+              if (result.plan_code) parts.push(`Plan: ${result.plan_code}`);
+              if (typeof result.trial_credits_added === "number") parts.push(`Trial credits added: ${result.trial_credits_added}`);
+              if (result.trial_end) {
+                const d = new Date(result.trial_end);
+                parts.push(`Trial ends: ${d.toLocaleString()}`);
+              }
+              setCheckoutMessage(parts.length ? `Subscription trial activated. ${parts.join(" • ")}` : "Subscription trial activated.");
+            }
+          }
+
+          if (sessionId || subSessionId) {
             try {
-              console.log("[Dashboard] Reloading profile after checkout confirm");
               const data = await getProfile();
               setProfile(data);
             } catch (e: any) {
-              console.error("[Dashboard] Reload profile after checkout failed", e);
+              console.error("[Dashboard] Reload profile after billing confirm failed", e);
             }
           }
         } catch (e: any) {
-          console.error("[Dashboard] Confirm checkout failed", e);
-          setError(e?.message || "Failed to confirm checkout");
+          console.error("[Dashboard] Confirm billing session failed", e);
+          setError(e?.message || "Failed to confirm billing session");
         } finally {
           setCheckingSession(false);
           console.groupEnd();
           try {
             url.searchParams.delete("session_id");
+            url.searchParams.delete("sub_session_id");
             window.history.replaceState({}, "", url.toString());
           } catch {
             // ignore
@@ -140,7 +158,7 @@ const Dashboard = () => {
             <div className="border-4 border-black bg-card p-6 shadow-brutal">
               <h3 className="text-xl font-bold mb-3">Buy Credits</h3>
               <div className="flex flex-wrap gap-3">
-                {[1, 5, 25, 49].map((usd) => (
+                {[1, 25, 49].map((usd) => (
                   <Button key={usd} variant="outline" onClick={async () => {
                     console.groupCollapsed('[Dashboard] Checkout', usd);
                     try {
@@ -153,7 +171,7 @@ const Dashboard = () => {
                       console.groupEnd();
                     }
                   }}>
-                    ${usd} → {usd * 100} credits
+                    ${usd} → {(usd * 1000).toLocaleString()} credits
                   </Button>
                 ))}
               </div>

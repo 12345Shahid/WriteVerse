@@ -6,11 +6,13 @@ import { Button } from "@/components/ui/button-brutal";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Loader2, Upload, FileText, Trash, Search, Paperclip } from "lucide-react";
+import { Loader2, Upload, FileText, Trash, Search, Paperclip, Lock } from "lucide-react";
 import { toast } from "sonner";
 import { TagSelector } from "@/components/TagSelector";
+import { usePermissions } from "@/hooks/usePermissions";
 
 export default function KnowledgeBase() {
+  const { canEdit, isViewer } = usePermissions();
   const { currentTeam } = useTeam();
   const [files, setFiles] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -53,6 +55,10 @@ export default function KnowledgeBase() {
   };
 
   const handleIngest = async () => {
+    if (!canEdit) {
+      toast.error('Viewers cannot add documents');
+      return;
+    }
     if (!title.trim() || !content.trim()) return toast.error("Title and Content required");
     
     setUploading(true);
@@ -87,6 +93,10 @@ export default function KnowledgeBase() {
   };
 
   const handleDelete = async (id: string) => {
+    if (!canEdit) {
+      toast.error('Viewers cannot delete documents');
+      return;
+    }
     if(!confirm("Delete this file and all its knowledge chunks?")) return;
     const { error } = await supabase.from('knowledge_files').delete().eq('id', id);
     if(error) toast.error(error.message);
@@ -105,9 +115,16 @@ export default function KnowledgeBase() {
               <h1 className="text-3xl font-bold">Knowledge Base (RAG)</h1>
               <p className="text-muted-foreground">Upload facts, guidelines, and context for your AI agents.</p>
           </div>
-          <Button className="bg-black text-white" onClick={() => setShowForm(!showForm)}>
-            <Upload className="mr-2 h-4 w-4" /> {showForm ? 'Cancel' : 'Add Knowledge'}
-          </Button>
+          {isViewer ? (
+            <div className="bg-yellow-50 border-2 border-yellow-400 p-3 rounded flex items-center gap-2">
+              <Lock className="w-4 h-4 text-yellow-600" />
+              <p className="text-sm text-yellow-700 font-medium">Viewers can only add tags to documents</p>
+            </div>
+          ) : (
+            <Button className="bg-black text-white" onClick={() => setShowForm(!showForm)}>
+              <Upload className="mr-2 h-4 w-4" /> {showForm ? 'Cancel' : 'Add Knowledge'}
+            </Button>
+          )}
         </div>
 
         {showForm && (
@@ -170,7 +187,14 @@ export default function KnowledgeBase() {
                 {files.map(file => (
                     <div key={file.id} className="border-2 border-black bg-card p-4 shadow-brutal-sm hover:translate-x-1 hover:-translate-y-1 transition-transform relative group">
                         <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <Button variant="ghost" size="sm" onClick={() => handleDelete(file.id)} className="text-red-500 h-8 w-8 p-0">
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              onClick={() => handleDelete(file.id)} 
+                              disabled={isViewer}
+                              className={`text-red-500 h-8 w-8 p-0 ${isViewer ? 'opacity-50 cursor-not-allowed' : ''}`}
+                              title={isViewer ? 'Viewers cannot delete documents' : 'Delete document'}
+                            >
                                 <Trash className="h-4 w-4"/>
                             </Button>
                         </div>

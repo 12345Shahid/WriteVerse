@@ -1,5 +1,5 @@
-import { getGemini } from './gemini';
-import { getSupabaseAdmin } from './supabase';
+import { getGemini } from './gemini.js';
+import { getSupabaseAdmin } from './supabase.js';
 
 export async function generateEmbedding(text: string) {
     const genAI = getGemini();

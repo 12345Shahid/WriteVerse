@@ -6,7 +6,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { generate, saveResults } from "@/lib/api";
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles, Lock } from "lucide-react";
+import { useModel } from "@/context/ModelContext";
+import { useBrandVoice } from "@/context/BrandVoiceContext";
+import { usePermissions } from "@/hooks/usePermissions";
 
 interface SocialResult { text: string }
 
@@ -27,6 +30,9 @@ const platforms = [
 ];
 
 const SocialHelperTool = () => {
+  const { canGenerate, isViewer } = usePermissions();
+  const { selectedModelId } = useModel();
+  const { selectedVoiceId } = useBrandVoice();
   const [formData, setFormData] = useState({
     mode: "post",
     platform: "twitter",
@@ -40,6 +46,10 @@ const SocialHelperTool = () => {
   const [isLoading, setIsLoading] = useState(false);
 
   const handleGenerate = async () => {
+    if (!canGenerate) {
+      alert('Viewers cannot generate content');
+      return;
+    }
     if (!formData.topic.trim()) {
       alert("Please enter a topic or idea for the content");
       return;
@@ -62,6 +72,8 @@ const SocialHelperTool = () => {
         tool: "social_helper",
         inputs,
         outputCount: formData.outputCount,
+        modelId: selectedModelId,
+        brandVoiceId: selectedVoiceId,
       });
       const out = (data?.results ?? []) as SocialResult[];
       setResults(out);
@@ -213,10 +225,18 @@ const SocialHelperTool = () => {
                   />
                 </div>
 
+                {isViewer && (
+                  <div className="mb-4 p-3 bg-yellow-50 border-2 border-yellow-400 rounded flex items-start gap-2">
+                    <Lock className="w-4 h-4 text-yellow-600 mt-0.5" />
+                    <p className="text-sm text-yellow-700"><strong>Viewer:</strong> You cannot generate content</p>
+                  </div>
+                )}
+
                 <Button
                   onClick={handleGenerate}
-                  disabled={isLoading || !formData.topic.trim()}
-                  className="w-full bg-black text-white"
+                  disabled={isLoading || !formData.topic.trim() || isViewer}
+                  className={`w-full bg-black text-white ${isViewer ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  title={isViewer ? 'Viewers cannot generate content' : ''}
                   size="lg"
                 >
                   {isLoading ? (

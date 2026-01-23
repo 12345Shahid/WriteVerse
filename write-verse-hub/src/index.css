@@ -189,23 +189,18 @@
   .bg-brutal-yellow {
     background-color: hsl(var(--brutalist-yellow));
   }
-
   .bg-brutal-pink {
     background-color: hsl(var(--brutalist-pink));
   }
-
   .bg-brutal-blue {
     background-color: hsl(var(--brutalist-blue));
   }
-
   .bg-brutal-green {
     background-color: hsl(var(--brutalist-green));
   }
-
   .bg-brutal-purple {
     background-color: hsl(var(--brutalist-purple));
   }
-
   .bg-brutal-orange {
     background-color: hsl(var(--brutalist-orange));
   }
@@ -213,16 +208,115 @@
   .text-brutal-yellow {
     color: hsl(var(--brutalist-yellow));
   }
-
   .text-brutal-pink {
     color: hsl(var(--brutalist-pink));
   }
-
   .text-brutal-blue {
     color: hsl(var(--brutalist-blue));
   }
-
   .text-brutal-green {
     color: hsl(var(--brutalist-green));
   }
+}
+
+
+/* =================================================================
+   LANDING PAGE STYLES (FUTURISTIC THEME)
+   Scoped to .landing-page class to avoid breaking dashboard
+   ================================================================= */
+.landing-theme {
+  --background: 222 47% 6%;
+  --foreground: 210 40% 98%;
+  --card: 222 47% 10%;
+  --card-foreground: 210 40% 98%;
+  --primary: 195 100% 50%;
+  --primary-foreground: 222 47% 6%;
+  --secondary: 270 70% 50%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 222 30% 18%;
+  --muted-foreground: 215 20% 55%;
+  --accent: 210 100% 60%;
+  --border: 222 30% 20%;
+  --radius: 0.75rem;
+  
+  --glow-primary: 195 100% 50%;
+  --glow-secondary: 270 70% 50%; /* purple */
+  --glow-accent: 210 100% 60%;     /* blue */
+  
+  --glass-opacity: 0.08;
+  --glass-blur: 20px;
+  --glass-border-opacity: 0.15;
+
+  font-family: 'Inter', sans-serif;
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+
+@layer utilities {
+  .glass-card {
+    background: hsl(var(--card) / var(--glass-opacity));
+    backdrop-filter: blur(var(--glass-blur));
+    border: 1px solid hsl(var(--border) / var(--glass-border-opacity));
+    box-shadow: 0 4px 30px hsl(var(--background) / 0.5);
+  }
+  
+  .glow-primary { 
+    box-shadow: 0 0 20px hsl(var(--glow-primary) / 0.3), 0 0 40px hsl(var(--glow-primary) / 0.2); 
+  }
+  
+  .glow-accent { 
+    box-shadow: 0 0 15px hsl(var(--glow-accent) / 0.4); 
+  }
+
+  .gradient-text {
+    background: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--secondary)));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  
+  .grid-background {
+    background-image: linear-gradient(hsl(var(--border) / 0.1) 1px, transparent 1px), linear-gradient(90deg, hsl(var(--border) / 0.1) 1px, transparent 1px);
+    background-size: 50px 50px;
+  }
+  
+  .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  .hide-scrollbar::-webkit-scrollbar { display: none; }
+  
+  .btn-premium {
+    @apply relative inline-flex items-center justify-center px-8 py-4 text-sm font-semibold uppercase tracking-wider bg-primary text-primary-foreground rounded-lg overflow-hidden transition-all duration-300 hover:scale-105;
+  }
+  
+  .btn-glass {
+    @apply relative inline-flex items-center justify-center px-6 py-3 text-sm font-medium glass-card text-foreground rounded-lg transition-all duration-300 hover:bg-muted/20;
+  }
+  
+  .section-title { @apply text-4xl md:text-5xl lg:text-6xl font-bold tracking-tight; }
+  .section-subtitle { @apply text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto font-light leading-relaxed; }
+  
+  .feature-card { @apply glass-card rounded-2xl p-6 transition-all duration-500 hover:translate-y-[-8px]; }
+  
+  .neon-border { position: relative; }
+  .neon-border::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--secondary)));
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    opacity: 0.5;
+  }
+  
+  .spline-container { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+  .spline-container iframe { width: 100%; height: 100%; border: none; pointer-events: auto; }
+  
+  .pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 20px hsl(var(--primary) / 0.4), 0 0 40px hsl(var(--primary) / 0.2); }
+  50% { box-shadow: 0 0 30px hsl(var(--primary) / 0.6), 0 0 60px hsl(var(--primary) / 0.3); }
 }

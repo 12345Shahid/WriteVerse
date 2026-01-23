@@ -5,7 +5,17 @@ import { supabase } from "@/lib/supabase";
 import { SiteNav } from "@/components/SiteNav";
 import { Button } from "@/components/ui/button-brutal";
 import { Input } from "@/components/ui/input";
-import { Loader2, Play, CheckCircle, ArrowLeft } from "lucide-react";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Loader2, Play, CheckCircle, ArrowLeft, Mic2 } from "lucide-react";
+import { AVAILABLE_MODELS } from "@/context/ModelContext";
+import { listBrandVoices, BrandVoice } from "@/lib/api-brand-voices";
 
 export default function WorkflowRunner() {
   const { id } = useParams();
@@ -15,14 +25,30 @@ export default function WorkflowRunner() {
   const [inputs, setInputs] = useState<{key: string, value: string}[]>([{key: "topic", value: ""}]);
   const [execution, setExecution] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [selectedModelId, setSelectedModelId] = useState("google/gemini-2.0-flash-001");
+  const [selectedVoiceId, setSelectedVoiceId] = useState<string | undefined>(undefined);
+  const [brandVoices, setBrandVoices] = useState<BrandVoice[]>([]);
 
   useEffect(() => {
     if (id) loadWorkflow();
   }, [id]);
 
+  useEffect(() => {
+    if (currentTeam) loadBrandVoices();
+  }, [currentTeam]);
+
   const loadWorkflow = async () => {
     const { data } = await supabase.from('workflows').select('*').eq('id', id).single();
     setWorkflow(data);
+  };
+
+  const loadBrandVoices = async () => {
+    try {
+      const voices = await listBrandVoices();
+      setBrandVoices(voices);
+    } catch (e) {
+      console.error('Failed to load brand voices', e);
+    }
   };
 
   const handleRun = async () => {
@@ -47,7 +73,7 @@ export default function WorkflowRunner() {
                 'x-organization-id': currentTeam?.id || '',
                 'x-user-id': user?.id || ''
             },
-            body: JSON.stringify({ inputs: inputPayload })
+            body: JSON.stringify({ inputs: inputPayload, modelId: selectedModelId, brandVoiceId: selectedVoiceId })
         });
         
         const data = await res.json();
@@ -76,6 +102,42 @@ export default function WorkflowRunner() {
                 <h1 className="text-3xl font-bold mb-2">{workflow.name}</h1>
                 <p className="text-muted-foreground mb-8">{workflow.description}</p>
                 
+                <h3 className="font-bold text-lg mb-4 uppercase">Configuration</h3>
+                <div className="space-y-4 mb-6">
+                    <div>
+                        <Label className="mb-2 block">Default Model</Label>
+                        <Select value={selectedModelId} onValueChange={setSelectedModelId}>
+                            <SelectTrigger className="input-brutal bg-white">
+                                <SelectValue placeholder="Select Model" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {AVAILABLE_MODELS.map(m => (
+                                    <SelectItem key={m.id} value={m.id}>
+                                        {m.name}
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                    </div>
+                    <div>
+                        <Label className="mb-2 block flex items-center gap-2">
+                            <Mic2 className="h-4 w-4" /> Brand Voice
+                        </Label>
+                        <Select value={selectedVoiceId || "none"} onValueChange={(val) => setSelectedVoiceId(val === "none" ? undefined : val)}>
+                            <SelectTrigger className="input-brutal bg-white">
+                                <SelectValue placeholder="Select Brand Voice" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="none">Default Voice</SelectItem>
+                                {brandVoices.map(v => (
+                                    <SelectItem key={v.id} value={v.id}>{v.name}</SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground mt-1">AI will adapt output to match this voice</p>
+                    </div>
+                </div>
+
                 <h3 className="font-bold text-lg mb-4 uppercase">Run Inputs</h3>
                 <div className="space-y-3 mb-6">
                     {inputs.map((inp, i) => (
@@ -110,18 +172,52 @@ export default function WorkflowRunner() {
                             <CheckCircle /> Execution Complete
                         </div>
                         
-                        {Object.entries(execution.results || {}).map(([stepId, output]: [string, any]) => (
-                            stepId !== 'initial' && (
+                        {execution.error && (
+                            <div className="border-2 border-red-500 bg-red-50 p-4 text-red-700">
+                                <div className="font-bold mb-2">Error:</div>
+                                <p>{execution.error}</p>
+                            </div>
+                        )}
+                        
+                        {Object.entries(execution.results || {}).filter(([stepId]) => stepId !== 'initial').length === 0 && !execution.error && (
+                            <div className="text-muted-foreground">No step outputs found.</div>
+                        )}
+                        
+                        {Object.entries(execution.results || {}).map(([stepId, output]: [string, any]) => {
+                            if (stepId === 'initial') return null;
+                            
+                            // Format output for display
+                            const formatOutput = (data: any): string => {
+                                if (!data) return 'No output';
+                                if (typeof data === 'string') return data;
+                                if (typeof data === 'object') {
+                                    // Handle blog_post and similar structured outputs
+                                    if (data.body) return `Title: ${data.title || 'Untitled'}\n\n${data.body}`;
+                                    if (data.text) return data.text;
+                                    if (Array.isArray(data)) {
+                                        return data.map((item, i) => {
+                                            if (typeof item === 'string') return item;
+                                            if (item?.text) return item.text;
+                                            if (item?.body) return `${item.title || `Item ${i+1}`}\n${item.body}`;
+                                            return JSON.stringify(item, null, 2);
+                                        }).join('\n\n---\n\n');
+                                    }
+                                    return JSON.stringify(data, null, 2);
+                                }
+                                return String(data);
+                            };
+                            
+                            return (
                                 <div key={stepId} className="border-2 border-black bg-white p-4">
                                     <div className="font-bold uppercase text-xs text-muted-foreground mb-2">Output from {stepId}</div>
                                     <div className="prose max-w-none">
-                                        <pre className="whitespace-pre-wrap text-sm bg-muted p-2 overflow-x-auto">
-                                            {typeof output === 'object' ? JSON.stringify(output, null, 2) : String(output)}
+                                        <pre className="whitespace-pre-wrap text-sm bg-muted p-3 overflow-x-auto max-h-[400px] overflow-y-auto">
+                                            {formatOutput(output)}
                                         </pre>
                                     </div>
                                 </div>
-                            )
-                        ))}
+                            );
+                        })}
                     </div>
                 ) : (
                     <div className="flex flex-col items-center justify-center h-64 text-muted-foreground">

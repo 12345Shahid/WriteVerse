@@ -1,65 +1,76 @@
-import { SiteNav } from "@/components/SiteNav";
+import PublicLayout from "@/layouts/PublicLayout";
 
 const Privacy = () => {
   return (
-    <div className="min-h-screen bg-background">
-      <SiteNav />
+    <PublicLayout>
+      <div className="container mx-auto px-6 py-12 md:py-20 animate-fade-in">
+        <div className="max-w-4xl mx-auto">
+          {/* Header */}
+          <div className="text-center mb-16">
+            <h1 className="text-4xl md:text-6xl font-bold mb-6">
+              Privacy <span className="gradient-text">Policy</span>
+            </h1>
+            <p className="text-xl text-muted-foreground max-w-2xl mx-auto font-light">
+              Your privacy is paramount. Here's how we protect and manage your data.
+            </p>
+          </div>
 
-      <header className="border-b-4 border-black bg-muted">
-        <div className="container mx-auto px-4 py-12">
-          <h1 className="text-4xl md:text-5xl font-bold mb-3">Privacy Policy</h1>
-          <p className="text-lg font-medium text-muted-foreground max-w-3xl">
-            Your privacy matters. This policy explains what we collect and how we use it.
-          </p>
+          <div className="space-y-8">
+            <section className="glass-card rounded-2xl p-8 border-l-4 border-l-primary/50">
+              <h2 className="text-2xl font-bold mb-4 text-white">Information We Collect</h2>
+              <ul className="space-y-3 text-muted-foreground">
+                <li className="flex gap-3 items-start">
+                  <span className="text-primary mt-1">•</span>
+                  <span><strong>Account Data:</strong> Email address, name, and profile information you provide during signup.</span>
+                </li>
+                <li className="flex gap-3 items-start">
+                  <span className="text-primary mt-1">•</span>
+                  <span><strong>Usage Data:</strong> Information about how you use our tools, saved projects, and preferences.</span>
+                </li>
+                <li className="flex gap-3 items-start">
+                  <span className="text-primary mt-1">•</span>
+                  <span><strong>Analytic Data:</strong> Aggregated, anonymous data to help us improve system performance.</span>
+                </li>
+              </ul>
+            </section>
+
+            <section className="glass-card rounded-2xl p-8 border-l-4 border-l-secondary/50">
+              <h2 className="text-2xl font-bold mb-4 text-white">How We Use Your Data</h2>
+              <ul className="space-y-3 text-muted-foreground">
+                <li className="flex gap-3 items-start">
+                  <span className="text-secondary mt-1">•</span>
+                  <span>To provide and maintain the WriteVerse Hub service.</span>
+                </li>
+                <li className="flex gap-3 items-start">
+                  <span className="text-secondary mt-1">•</span>
+                  <span>To improve our AI models and user experience (anonymized only).</span>
+                </li>
+                <li className="flex gap-3 items-start">
+                  <span className="text-secondary mt-1">•</span>
+                  <span>To communicate with you about updates, security, and support.</span>
+                </li>
+              </ul>
+            </section>
+
+            <section className="glass-card rounded-2xl p-8 border-l-4 border-l-accent/50">
+              <h2 className="text-2xl font-bold mb-4 text-white">Data Storage & Security</h2>
+              <p className="text-muted-foreground leading-relaxed mb-4">
+                We utilize industry-standard encryption and security practices. Authentication is handled via Supabase, and payments are processed securely through Stripe. We do not sell your personal data to third parties.
+              </p>
+              <p className="text-muted-foreground leading-relaxed">
+                Please note that AI generation involves sending prompts to LLM providers. Do not input sensitive personal information (PII) into the generation tools.
+              </p>
+            </section>
+
+            <section className="mt-12 text-center border-t border-white/10 pt-8">
+              <p className="text-muted-foreground">
+                Questions? Contact us at <a href="mailto:support@writeverse.com" className="text-primary hover:underline">support@writeverse.com</a>
+              </p>
+            </section>
+          </div>
         </div>
-      </header>
-
-      <main className="container mx-auto px-4 py-12 space-y-8 max-w-4xl">
-        <section className="border-4 border-black bg-card p-6 shadow-brutal">
-          <h2 className="text-2xl font-bold mb-2">Information We Collect</h2>
-          <ul className="list-disc pl-6 font-medium space-y-2">
-            <li>Account data: email address and basic profile info you provide.</li>
-            <li>Usage data: tool interactions and saved results you choose to store.</li>
-            <li>Technical data: device, browser, and analytics events (aggregated).</li>
-          </ul>
-        </section>
-
-        <section className="border-4 border-black bg-card p-6 shadow-brutal">
-          <h2 className="text-2xl font-bold mb-2">How We Use Data</h2>
-          <ul className="list-disc pl-6 font-medium space-y-2">
-            <li>To operate the app and deliver writing features.</li>
-            <li>To improve quality, reliability, and user experience.</li>
-            <li>To prevent abuse and ensure platform security.</li>
-          </ul>
-        </section>
-
-        <section className="border-4 border-black bg-card p-6 shadow-brutal">
-          <h2 className="text-2xl font-bold mb-2">Storage & Processors</h2>
-          <p className="font-medium">
-            We use Supabase for authentication and database. AI generation may call external LLM APIs. Do not submit confidential or sensitive data you are not comfortable sharing with these processors.
-          </p>
-        </section>
-
-        <section className="border-4 border-black bg-card p-6 shadow-brutal">
-          <h2 className="text-2xl font-bold mb-2">Your Choices</h2>
-          <ul className="list-disc pl-6 font-medium space-y-2">
-            <li>You can delete saved results and revoke sharing links at any time.</li>
-            <li>You can request account deletion by contacting support.</li>
-          </ul>
-        </section>
-
-        <section className="border-4 border-black bg-card p-6 shadow-brutal">
-          <h2 className="text-2xl font-bold mb-2">Contact</h2>
-          <p className="font-medium">Questions about privacy? Reach out via the Dashboard contact link.</p>
-        </section>
-      </main>
-
-      <footer className="border-t-4 border-black bg-background py-10 mt-8">
-        <div className="container mx-auto px-4 text-center">
-          <p className="font-bold text-sm text-muted-foreground">© 2025 WriterAI</p>
-        </div>
-      </footer>
-    </div>
+      </div>
+    </PublicLayout>
   );
 };
 

@@ -6,22 +6,32 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { generate, saveResults } from "@/lib/api";
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles, Lock } from "lucide-react";
+import { useModel } from "@/context/ModelContext";
+import { useBrandVoice } from "@/context/BrandVoiceContext";
+import { usePermissions } from "@/hooks/usePermissions";
 
 interface ThreadOut { tweets: string[]; engagementPrediction: string; hashtags: string; }
 
 const TwitterThreadTool = () => {
+  const { canGenerate, isViewer } = usePermissions();
+  const { selectedModelId } = useModel();
+  const { selectedVoiceId } = useBrandVoice();
   const [formData, setFormData] = useState({ topic: "", audience: "general", tone: "educational", length: 5 });
   const [result, setResult] = useState<ThreadOut | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   const handleGenerate = async () => {
+    if (!canGenerate) {
+      alert('Viewers cannot generate content');
+      return;
+    }
     if (!formData.topic.trim()) { alert("Please enter a topic"); return; }
     setIsLoading(true);
     console.groupCollapsed("[TwitterThreadTool] Generate");
     console.debug("inputs", formData);
     try {
-      const data = await generate({ tool: "twitter_thread", inputs: formData, outputCount: 1 });
+      const data = await generate({ tool: "twitter_thread", inputs: formData, outputCount: 1, modelId: selectedModelId, brandVoiceId: selectedVoiceId });
       const out = (data?.results ?? null) as any;
       setResult(out as ThreadOut);
       try {
@@ -73,7 +83,15 @@ const TwitterThreadTool = () => {
                   <Label className="font-bold uppercase text-sm">Length</Label>
                   <Input type="number" min={3} max={20} value={formData.length} onChange={(e)=>setFormData({...formData, length: Number(e.target.value)})} className="input-brutal"/>
                 </div>
-                <Button onClick={handleGenerate} disabled={isLoading || !formData.topic.trim()} className="w-full bg-black text-white" size="lg">
+                {isViewer && (
+                  <div className="mb-4 p-3 bg-yellow-50 border-2 border-yellow-400 rounded flex items-start gap-2">
+                    <Lock className="w-4 h-4 text-yellow-600 mt-0.5" />
+                    <p className="text-sm text-yellow-700"><strong>Viewer:</strong> You cannot generate content</p>
+                  </div>
+                )}
+
+                <Button onClick={handleGenerate} disabled={isLoading || !formData.topic.trim() || isViewer}
+                  className={`w-full bg-black text-white ${isViewer ? 'opacity-50 cursor-not-allowed' : ''}`} title={isViewer ? 'Viewers cannot generate content' : ''} size="lg">
                   {isLoading ? (<><Loader2 className="mr-2 h-5 w-5 animate-spin"/>Composing...</>) : (<><Sparkles className="mr-2 h-5 w-5"/>Compose Thread</>)}
                 </Button>
               </div>

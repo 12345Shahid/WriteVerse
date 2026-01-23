@@ -1,0 +1,98 @@
+# Walkthrough: Production Deployment Complete
+
+## Deployment Status ✅
+
+Successfully deployed to Vercel production:
+- **URL:** https://writerai-hub.vercel.app
+- **Inspect:** https://vercel.com/shahids-projects-1423cd8d/writerai-hub
+
+---
+
+## Features Verified Against feature-analysis-dec2024.md
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Embed Chatbot Enhancements** | ✅ Complete | |
+| - Proactive Messages | ✅ | TriggerManager component |
+| - Basic Analytics | ✅ | AgentAnalytics component |
+| - Email Channel | ✅ | Via Resend |
+| - Advanced Escalation | ✅ | Novu integration |
+| - CRM Integration | ✅ | HubSpot, Salesforce, Pipedrive |
+| **API Access (Business Tier)** | ✅ Complete | |
+| - API Key Management | ✅ | `/settings/api` page |
+| - Rate Limiting | ✅ | 50-500 req/min by tier |
+| - Workflows/Templates/Models API | ✅ | Full CRUD endpoints |
+| **SSO/SAML (Enterprise)** | ✅ Complete | |
+| - WorkOS Integration | ✅ | [server/lib/workos.js](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/lib/workos.js) |
+| - SSO Settings Page | ✅ | `/settings/sso` |
+| **Natural Write Mode** | ✅ Complete | |
+| - Undetectable.ai Integration | ✅ | [server/lib/humanizer.js](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/lib/humanizer.js) |
+| - Toggle Component | ✅ | NaturalWriteToggle |
+| **SEO Keywords** | ✅ Complete | |
+| - Serper.dev Integration | ✅ | [server/lib/serper.js](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/lib/serper.js) |
+| - Keyword/SERP Endpoints | ✅ | `/api/keywords`, `/api/serp-analysis` |
+| **Gmail Integration** | ⏭️ Skipped | Per user request |
+
+---
+
+## Viewer Role Restrictions ✅
+
+All new pages and components now respect viewer role:
+
+| Component | Viewer Behavior |
+|-----------|-----------------|
+| **APISettings** | Cannot create/delete API keys (buttons blurred) |
+| **SSOSettings** | Cannot edit SSO config (inputs disabled) |
+| **TriggerManager** | Cannot add/edit/delete triggers (all disabled) |
+| **AgentCRMConnector** | Cannot connect/disconnect CRMs (buttons disabled) |
+
+### Implementation Pattern
+```tsx
+const isViewer = currentTeam?.role === 'viewer';
+// ...
+<Button disabled={isViewer} className={isViewer ? 'opacity-50 cursor-not-allowed' : ''}>
+```
+
+---
+
+## Files Created/Modified This Session
+
+### New Files
+| File | Purpose |
+|------|---------|
+| [src/pages/settings/APISettings.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/pages/settings/APISettings.tsx) | API key management page |
+| [server/lib/humanizer.js](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/lib/humanizer.js) | Undetectable.ai integration |
+| [server/lib/serper.js](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/lib/serper.js) | Serper.dev keyword research |
+| [src/components/NaturalWriteToggle.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/components/NaturalWriteToggle.tsx) | AI/Natural mode toggle |
+| [src/context/NaturalWriteContext.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/context/NaturalWriteContext.tsx) | State management |
+
+### Modified Files
+| File | Changes |
+|------|---------|
+| [server/index.js](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/index.js) | Added 10+ new API endpoints |
+| [server/lib/composio.js](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/server/lib/composio.js) | Added Salesforce/Pipedrive configs |
+| [src/App.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/App.tsx) | Added API route |
+| [src/pages/settings/SSOSettings.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/pages/settings/SSOSettings.tsx) | Added isViewer check |
+| [src/pages/settings/EmbedSettings.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/pages/settings/EmbedSettings.tsx) | Pass isViewer to children |
+| [src/components/TriggerManager.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/components/TriggerManager.tsx) | Added isViewer prop |
+| [src/components/AgentCRMConnector.tsx](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/src/components/AgentCRMConnector.tsx) | Added isViewer prop |
+
+---
+
+## Environment Variables Required
+
+| Variable | Feature | How to Get |
+|----------|---------|------------|
+| `UNDETECTABLE_API_KEY` | Natural Write | [undetectable.ai](https://undetectable.ai) |
+| `SERPER_API_KEY` | SEO Keywords | [serper.dev](https://serper.dev) |
+| `WORKOS_API_KEY` | SSO | [workos.com](https://workos.com) |
+| `WORKOS_CLIENT_ID` | SSO | WorkOS Dashboard |
+
+---
+
+## Next Steps
+
+1. **Add env vars in Vercel** for humanizer and SEO features
+2. **Run SQL migration** [SQL57_api_usage_logs.sql](file:///Users/shahidhasan/createHalal/write-ai/write-verse-hub/sql/SQL57_api_usage_logs.sql) in Supabase
+3. **Test Natural Write** once Undetectable.ai key is added
+4. **Test Keyword Research** once Serper.dev key is added

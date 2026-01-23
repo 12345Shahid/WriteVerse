@@ -2,6 +2,9 @@ import { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { SiteNav } from "@/components/SiteNav";
 import { BrandVoiceSelector } from "./BrandVoiceSelector";
+import { ModelSelector } from "./ModelSelector";
+import { NaturalWriteToggleInline } from "@/components/NaturalWriteToggle";
+import { useNaturalWrite } from "@/context/NaturalWriteContext";
 
 /**
  * Shared Tool Layout Component
@@ -27,6 +30,8 @@ interface ToolLayoutProps {
 }
 
 export const ToolLayout = ({ children, title, description }: ToolLayoutProps) => {
+  const { enabled: naturalWriteEnabled, setEnabled: setNaturalWrite } = useNaturalWrite();
+  
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -39,7 +44,9 @@ export const ToolLayout = ({ children, title, description }: ToolLayoutProps) =>
             <h1 className="text-3xl md:text-4xl font-bold mb-2">{title}</h1>
             <p className="text-lg font-medium text-muted-foreground">{description}</p>
           </div>
-          <div className="shrink-0">
+          <div className="shrink-0 flex flex-col md:flex-row items-end md:items-center gap-3">
+            <NaturalWriteToggleInline enabled={naturalWriteEnabled} onToggle={setNaturalWrite} />
+            <ModelSelector />
             <BrandVoiceSelector />
           </div>
         </div>

@@ -20,15 +20,12 @@ const TeamSettings = () => {
   const [isLoadingMembers, setIsLoadingMembers] = useState(false);
   
   const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState("viewer");
+  const [inviteRole, setInviteRole] = useState("viewer");  
   const [isInviting, setIsInviting] = useState(false);
-  const [lastInviteLink, setLastInviteLink] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (currentTeam) {
       loadMembers(currentTeam.id);
-      setLastInviteLink(null); // Reset link on switch
     } else {
       setMembers([]);
     }
@@ -65,16 +62,16 @@ const TeamSettings = () => {
   const handleInvite = async () => {
     if (!inviteEmail.trim() || !currentTeam) return;
     setIsInviting(true);
-    setLastInviteLink(null);
     try {
       const res = await inviteMember(currentTeam.id, inviteEmail, inviteRole);
-      if (res.inviteLink) {
-        setLastInviteLink(res.inviteLink);
-        toast({ title: "Invite Created", description: "Share the link below with the user." });
-      } else {
-        toast({ title: "Success", description: res.message });
-      }
+      toast({ 
+        title: "Invitation Sent!", 
+        description: `An email has been sent to ${inviteEmail}. They'll receive instructions to join your workspace.`,
+        duration: 5000 
+      });
       setInviteEmail("");
+      // Refresh members to show pending invite (if you list them)
+      setTimeout(() => loadMembers(currentTeam.id), 1000);
     } catch (e: any) {
       toast({ variant: "destructive", title: "Error", description: e.message });
     } finally {
@@ -82,13 +79,7 @@ const TeamSettings = () => {
     }
   };
 
-  const copyLink = () => {
-    if (!lastInviteLink) return;
-    navigator.clipboard.writeText(lastInviteLink);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-    toast({ title: "Copied", description: "Link copied to clipboard" });
-  };
+
 
   return (
     <ToolLayout title="Team Management" description="Manage your workspaces and team members">
@@ -215,19 +206,6 @@ const TeamSettings = () => {
                       </Button>
                     </div>
                   </div>
-
-                  {/* Copy Link Result */}
-                  {lastInviteLink && (
-                    <div className="bg-green-100 border-2 border-black p-4 animate-in fade-in zoom-in duration-300">
-                      <Label className="text-green-800 font-bold mb-2 block">Invitation Created! Share this link:</Label>
-                      <div className="flex gap-2">
-                        <Input readOnly value={lastInviteLink} className="bg-white font-mono text-xs" />
-                        <Button onClick={copyLink} variant="outline" className="bg-white">
-                          {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                        </Button>
-                      </div>
-                    </div>
-                  )}
 
                 </div>
               )}

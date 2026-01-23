@@ -13,8 +13,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles, Lock } from "lucide-react";
 import { useBrandVoice } from "@/context/BrandVoiceContext";
+import { usePermissions } from "@/hooks/usePermissions";
+import { useModel } from "@/context/ModelContext";
 
 /**
  * LinkedIn Post Generator Tool
@@ -48,7 +50,9 @@ interface Result {
 }
 
 const LinkedInTool = () => {
+  const { canGenerate, isViewer } = usePermissions();
   const { selectedVoiceId } = useBrandVoice();
+  const { selectedModelId } = useModel();
   const [formData, setFormData] = useState({
     topic: "",
     industry: "technology",
@@ -76,6 +80,10 @@ const LinkedInTool = () => {
   };
 
   const handleGenerate = async () => {
+    if (!canGenerate) {
+      alert('Viewers cannot generate content');
+      return;
+    }
     if (!formData.topic.trim()) {
       alert("Please enter a topic");
       return;
@@ -91,6 +99,7 @@ const LinkedInTool = () => {
         inputs: formData,
         outputCount: 3,
         brandVoiceId: selectedVoiceId,
+        modelId: selectedModelId,
       });
       const arr = (data?.results ?? []) as Result[];
       console.debug("results.count", Array.isArray(arr) ? arr.length : 0);
@@ -186,9 +195,18 @@ const LinkedInTool = () => {
                   </Select>
                 </div>
 
+                {isViewer && (
+                  <div className="mb-4 p-3 bg-yellow-50 border-2 border-yellow-400 rounded flex items-start gap-2">
+                    <Lock className="w-4 h-4 text-yellow-600 mt-0.5" />
+                    <p className="text-sm text-yellow-700"><strong>Viewer:</strong> You cannot generate content</p>
+                  </div>
+                )}
+
                 <Button
                   onClick={handleGenerate}
-                  disabled={isLoading || !formData.topic.trim()}
+                  disabled={isLoading || !formData.topic.trim() || isViewer}
+                  className={isViewer ? 'opacity-50 cursor-not-allowed' : ''}
+                  title={isViewer ? 'Viewers cannot generate content' : ''}
                   className="w-full bg-black text-white"
                   size="lg"
                 >

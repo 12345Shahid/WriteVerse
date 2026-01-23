@@ -24,10 +24,20 @@ const EXAMPLE_STEPS = [
   },
   {
     "id": "step2",
-    "tool": "linkedin",
+    "tool": "custom_agent",
+    "if": "{{step1.body}} contains 'AI'",
     "params": {
-      "tone": "educational"
+      "agentId": "INSERT_AGENT_UUID_HERE"
     },
+    "input_map": {
+      "message": "Critique this content: {{step1.body}}"
+    }
+  },
+  {
+    "id": "step3",
+    "tool": "linkedin",
+    "loop": { "count": 3 },
+    "params": { "tone": "viral" },
     "input_map": {
       "topic": "{{step1.body}}" 
     }
@@ -123,7 +133,7 @@ export default function WorkflowBuilder() {
                 <div>
                     <div className="flex justify-between items-center mb-2">
                         <Label>Steps Configuration (JSON)</Label>
-                        <span className="text-xs text-muted-foreground">Define steps array with tool inputs and variable mapping</span>
+                        <span className="text-xs text-muted-foreground">Supported features: <b>if</b> conditions, <b>loop</b>, and <b>custom_agent</b> tool</span>
                     </div>
                     <Textarea 
                         value={stepsJson} 

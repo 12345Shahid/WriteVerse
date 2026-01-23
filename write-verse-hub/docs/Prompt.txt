@@ -1,0 +1,212 @@
+Design a futuristic, immersive, and premium landing page for "WriteVerse Hub" - an advanced AI writing workspace for teams.
+The visual aesthetic must reflect the style, colors, glow, and modern elegance of the attached image named {{reference.}}
+
+Use cutting-edge tools:
+
+GSAP for powerful animation
+
+Locomotive Scroll for smooth parallax scrolling
+
+Spline for 3D integration in the hero section
+
+Site must be fully responsive across all devices.
+
+🔄 GSAP Loading Animation & Progress Bar (New)
+Add a modern, cinematic loading animation before the main content appears:
+
+Fullscreen preloader screen with a centered animated logo or text (e.g., "WriteVerse Hub")
+
+Include a progress bar that fills from 0% to 100% using GSAP
+
+After loading completes:
+
+Progress bar fades out
+
+Preloader scales and fades away
+
+Main content fades in with smooth transitions
+
+Example animation flow (GSAP):
+js
+Copy
+Edit
+gsap.to(".progress-bar", {
+  width: "100%",
+  duration: 2,
+  ease: "power2.out",
+  onComplete: () => {
+    gsap.to(".preloader", {
+      opacity: 0,
+      scale: 0.9,
+      duration: 1,
+      onComplete: () => {
+        document.querySelector(".preloader").style.display = "none";
+      }
+    });
+  }
+});
+The loading sequence should set the tone: techy, smooth, and premium.
+
+📄 Pages & Sections
+1. Homepage / Hero Section
+Large animated headline: {{“WriteVerse Hub – The Future of Team Publishing”}}
+
+Subtitle + glowing {{“Start Free Trial”}} CTA button
+
+Background:
+Fullscreen Spline 3D model use this embed:
+( <iframe src='https://my.spline.design/orb-0OdFe56nj2CjC0zB90fe6lbn/' frameborder='0' width='100%' height='100%'></iframe> )
+
+Floating neon orbs that scroll subtly
+
+GSAP Animations:
+
+Headline: opacity 0 → 1, y: 50 → 0, blur: 10px → 0
+
+CTA: scale pulse on hover
+
+Spline fades in from right
+
+Background glow elements float using yoyo & repeat
+
+2. About Section
+Left: {{Profile}} placeholder. 
+INSTRUCTION FOR AI IMAGE GENERATION: Create a semi-abstract, futuristic 3D illustration symbolizing "Collective Intelligence". It should feature a central glowing node connecting to smaller orbiting nodes, representing a team connected by AI. Use a palette of deep violet, neon blue, and cyan. The style should be glassmorphic and high-tech.
+
+Right: Short {{bio: WriteVerse Hub is the all-in-one AI workspace for high-performing teams. Unite custom AI agents, multi-step workflows, and a shared knowledge base to automate your content pipeline—from research to final polished draft.}} + grid of feature icons (Custom Agents, Workflows, Knowledge Base, Brand Voice, Team Analytics)
+
+Use Phosphor Icons (light style) which correspond to the features listed above (e.g., Robot for Agents, TreeStructure for Workflows, Books for Knowledge, Microphone for Voice, Users for Team).
+
+GSAP:
+
+Section fade + blur-clear
+
+Image enters from left
+
+Icons appear staggered
+
+3. Projects Section (Showcase of Platform Capabilities)
+Horizontal bento-style scrollable layout
+
+6 glassmorphic feature cards. For each card, use the following AI Image Prompts to generate the visual:
+
+1. {{project-1}} (Dashboard): Create a UI mockup of a futuristic SaaS dashboard titled "WriteVerse Overview". Show a "Credit Balance" card, a usage graph with a glowing line, and a "Recent Activity" list. Dark mode with neon blue accents.
+2. {{project-2}} (Workflow Builder): Create a visualization of a node-based workflow editor. Show rectangular glass cards connected by glowing Bezier curves. Labels on nodes should read "Research", "Draft", "SEO Check". Dark background.
+3. {{project-3}} (Custom Agents): Create a card design for an AI Agent profile. It should show a robotic avatar icon, a name "Market Analyst", and a badge reading "Active". The card should have a subtle inner glow.
+4. {{project-4}} (Knowledge Base): Create an illustration of documents turning into digital energy. Show file icons (PDF, DOC) floating into a central glowing funnel, symbolizing data ingestion for AI training.
+5. {{project-5}} (Brand Voice): Create a visual representation of sound waves or a frequency analyzer in a sleek, digital interface style. Label it "Voice Calibration" to represent brand tone consistency.
+6. {{project-6}} (Team Chat): Create a mockup of a collaborative chat interface. Show a message bubble from a user and a reply from an AI, with a "Collaborating: 3 Users" indicator at the top.
+
+Title each card with the feature name and a short 1-sentence description.
+
+Tech stack icons, glowing CTA
+
+On hover: cards lift and glow
+
+GSAP + ScrollTrigger:
+
+Cards fade/scale/y position with stagger
+
+Mobile: stack cards and make slider swipeable
+
+4. Contact Section
+Form: Name, Email, Message [ replace the form with a card type of section for the free trial showing ]
+
+ start free trial button: hover glow + scale bounce on send
+
+Social icons (Instagram , LinkedIn)
+
+Glassmorphic inputs with glowing focus
+
+GSAP:
+
+Inputs fade from left
+
+Submit pulses
+
+Icons glow on hover
+
+5. Footer Section
+Mini nav links [at the moment, there are some links in the footer, and they will be the same ] + social icons
+
+Background: glowing floating particles
+
+GSAP: fade + slide-up (y: 60 → 0, blur → 0)
+
+📱 Responsive Behavior
+Hero/About stack vertically on small screens
+
+Nav becomes hamburger with full-screen slide tray
+
+Spline model and {{Profile}} image scale to fit
+
+Projects slider becomes swipeable
+
+⚙️ Animation Strategy
+GSAP ScrollTrigger for scroll-based animation
+
+Locomotive Scroll for parallax and smooth scroll
+
+GSAP Timelines for chaining animations
+
+Use:
+
+from(), fromTo(), stagger
+
+blur-to-clear, opacity 0 → 1, y 40 → 0
+
+Floating background elements using:
+
+js
+Copy
+Edit
+gsap.to(".glow-orb", {
+  y: -20,
+  duration: 3,
+  repeat: -1,
+  yoyo: true,
+  ease: "power1.inOut"
+});
+
+🧠 Design System
+Font: Inter (light, tight spacing)
+
+Icons: Phosphor (light)
+
+Text: Bold headings, semi-transparent body
+
+Cards: Glassmorphic, blurred backgrounds
+
+Buttons: Neumorphic glow
+
+Colors: Blues, violets, neons, gradients
+
+Effects: Soft shadows, glowing blur, floating visuals
+
+📝 Code Comments Instruction (IMPORTANT)
+When generating the code, please include extensive, detailed comments for:
+1.  **Structure**: Explain the purpose of each section and main container.
+2.  **Animation Logic**: For every GSAP animation, explain what it does (e.g., "// Animate headline opacity and slide up on load").
+3.  **Customization**: Mark areas where I can easily change colors, speed, or text (e.g., "// Change 'duration: 2' to adjust fade speed").
+This matches the user's request for "enough comments" to "adapt it with our landing page".
+
+
+
+
+
+
+
+
+
+
+
+ I have an API endpoint at [path] returning [error]. Please add debug logging:
+
+1. Log input parameters at the start 2. Log each database query result (success/failure, key fields, error message) 3. Log intermediate values that affect logic 4. For errors, log the full error object
+
+Format: console.log('[API][name] Description:', { data })
+
+Then redeploy and I'll share Vercel logs."
+
+
+

@@ -3,9 +3,10 @@ import { supabase } from "./supabase";
 // Since we are using a custom backend for some operations but supabase for auth, 
 // we need to decide if we call the backend API (port 8787) or Supabase directly.
 // The backend endpoints we created (port 8787) use supabaseAdmin to bypass RLS for some things,
-// but also enforce business logic. Let's use the backend API.
+// but also enforce business logic. Let's use the backend API via a relative /api path so that
+// local development uses the Vite proxy and production uses the deployed API.
 
-const API_URL = "http://localhost:8787/api";
+const API_URL = "/api";
 
 async function getHeaders() {
   const { data } = await supabase.auth.getSession();
@@ -34,7 +35,7 @@ export interface TeamMember {
 
 export async function listTeams(): Promise<Team[]> {
   const headers = await getHeaders();
-  const res = await fetch(`${API_URL}/teams`, { headers });
+  const res = await fetch(`${API_URL}/teams`, { headers, cache: 'no-store' });
   if (!res.ok) throw new Error("Failed to list teams");
   const data = await res.json();
   return data.teams || [];
@@ -76,7 +77,7 @@ export async function inviteMember(teamId: string, email: string, role: string) 
 
 export async function getTeamCredits(teamId: string): Promise<{ balance_credits: number; total_spent_usd: number }> {
   const headers = await getHeaders();
-  const res = await fetch(`${API_URL}/teams/${teamId}/credits`, { headers });
+  const res = await fetch(`${API_URL}/teams/${teamId}/credits`, { headers, cache: 'no-store' });
   if (!res.ok) throw new Error("Failed to fetch team credits");
   return await res.json();
 }

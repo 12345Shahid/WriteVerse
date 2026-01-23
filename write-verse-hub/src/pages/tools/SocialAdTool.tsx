@@ -6,13 +6,17 @@ import { Button } from "@/components/ui/button-brutal";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles, Lock } from "lucide-react";
 import { useBrandVoice } from "@/context/BrandVoiceContext";
+import { usePermissions } from "@/hooks/usePermissions";
+import { useModel } from "@/context/ModelContext";
 
 interface AdRow { text: string; platform: string; predictedCtr: string; trigger: string; charCount: number; }
 
 const SocialAdTool = () => {
+  const { canGenerate, isViewer } = usePermissions();
   const { selectedVoiceId } = useBrandVoice();
+  const { selectedModelId } = useModel();
   const [formData, setFormData] = useState({
     productName: "",
     audience: "millennials",
@@ -23,6 +27,10 @@ const SocialAdTool = () => {
   const [isLoading, setIsLoading] = useState(false);
 
   const handleGenerate = async () => {
+    if (!canGenerate) {
+      alert('Viewers cannot generate content');
+      return;
+    }
     if (!formData.productName.trim()) {
       alert("Please enter a product or service name");
       return;
@@ -35,7 +43,8 @@ const SocialAdTool = () => {
         tool: "social_ad",
         inputs: formData,
         outputCount: 5,
-        brandVoiceId: selectedVoiceId
+        brandVoiceId: selectedVoiceId,
+        modelId: selectedModelId,
       });
       const arr = (data?.results ?? []) as AdRow[];
       console.debug("results.count", Array.isArray(arr) ? arr.length : 0);
@@ -100,7 +109,15 @@ const SocialAdTool = () => {
                     </SelectContent>
                   </Select>
                 </div>
-                <Button onClick={handleGenerate} disabled={isLoading || !formData.productName.trim()} className="w-full bg-black text-white" size="lg">
+                {isViewer && (
+                  <div className="mb-4 p-3 bg-yellow-50 border-2 border-yellow-400 rounded flex items-start gap-2">
+                    <Lock className="w-4 h-4 text-yellow-600 mt-0.5" />
+                    <p className="text-sm text-yellow-700"><strong>Viewer:</strong> You cannot generate content</p>
+                  </div>
+                )}
+
+                <Button onClick={handleGenerate} disabled={isLoading || !formData.productName.trim() || isViewer}
+                  className={`w-full bg-black text-white ${isViewer ? 'opacity-50 cursor-not-allowed' : ''}`} title={isViewer ? 'Viewers cannot generate content' : ''} size="lg">
                   {isLoading ? (<><Loader2 className="mr-2 h-5 w-5 animate-spin"/>Generating...</>) : (<><Sparkles className="mr-2 h-5 w-5"/>Generate Ads</>)}
                 </Button>
               </div>
