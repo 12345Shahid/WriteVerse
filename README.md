@@ -9,20 +9,20 @@ To replace fragmented AI tool subscriptions by offering a unified workspace. Use
 
 ```mermaid
 flowchart TD
-    subgraph Frontend (React + Vite)
+    subgraph Frontend [Frontend React + Vite]
         UI[Dashboard / Tools]
         Team[Team Workspaces]
         Chat[Agent Inbox]
     end
 
-    subgraph Backend API (Express.js)
+    subgraph Backend [Backend API Express.js]
         API[Core API]
         RAG[Knowledge Base Search]
         Zap[Zapier / Composio Webhooks]
         Bill[Stripe Billing & Metering]
     end
 
-    subgraph External Services
+    subgraph External [External Services]
         DB[(Supabase PostgreSQL)]
         LLM[OpenRouter Models]
     end
